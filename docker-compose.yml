@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: bhash-postgres
+    environment:
+      POSTGRES_DB: bhash
+      POSTGRES_USER: bhash
+      POSTGRES_PASSWORD: bhashpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - bhash_pg:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: bhash-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  bhash_pg:

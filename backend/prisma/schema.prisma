@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/**
+ * Usuários DO CHAT (aparecem no chat)
+ */
+model User {
+  id                String   @id @default(uuid())
+  username          String   @unique
+  name              String
+  passwordHash      String
+  isActive          Boolean  @default(true)
+  mustChangePassword Boolean @default(false) // ✅ novo
+  createdAt         DateTime @default(now())
+  lastLoginAt        DateTime?
+
+  // Relações (chat)
+  conversationsA Conversation[] @relation("ConversationUserA")
+  conversationsB Conversation[] @relation("ConversationUserB")
+  sentMessages   Message[]      @relation("MessageSender")
+
+  @@map("users")
+}
+
+/**
+ * Admin DO PAINEL (NÃO aparece no chat)
+ */
+model AdminAccount {
+  id                   String   @id @default(uuid())
+  username             String   @unique
+  name                 String
+  passwordHash         String
+  isActive             Boolean  @default(true)
+
+  // ✅ já existe no seu projeto (pelo seu /admin/auth/me)
+  isSuperAdmin         Boolean  @default(false)
+  mustChangeCredentials Boolean @default(false)
+
+  // ✅ novo: para admins comuns (ou qualquer admin que você criar)
+  mustChangePassword   Boolean  @default(false)
+
+  createdAt            DateTime @default(now())
+  lastLoginAt          DateTime?
+
+  @@map("admin_accounts")
+}
+
+/**
+ * Config do app (logo/cor etc.)
+ * 1 registro com id = "default"
+ */
+model AppConfig {
+  id           String  @id
+  primaryColor String  @default("#001F3F")
+  logoUrl      String?
+
+  @@map("app_config")
+}
+
+model Conversation {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userAId String
+  userBId String
+
+  userA User @relation("ConversationUserA", fields: [userAId], references: [id])
+  userB User @relation("ConversationUserB", fields: [userBId], references: [id])
+
+  messages Message[]
+
+  @@unique([userAId, userBId])
+  @@index([updatedAt])
+  @@map("conversations")
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  conversationId String
+  senderId       String
+
+  body String
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  sender       User         @relation("MessageSender", fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
