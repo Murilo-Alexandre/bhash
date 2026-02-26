@@ -412,7 +412,7 @@ function OrgModal({
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="ex: Permetal / PCP"
+            placeholder="Exemplo: Vendas / Expedição / BHASH Interprises"
             style={{
               width: "100%",
               padding: "12px 12px",
