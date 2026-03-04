@@ -8,9 +8,10 @@ import { AdminAppConfigPage } from "./pages/AdminAppConfigPage";
 import { AdminFirstLoginPage } from "./pages/AdminFirstLoginPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { AdminAuditPage } from "./pages/AdminAuditPage";
-import { AdminOrgPage } from "./pages/AdminOrgPage"; // ✅ novo
+import { AdminOrgPage } from "./pages/AdminOrgPage";
+import { AdminHistoryPage } from "./pages/AdminHistoryPage";
 
-type PageKey = "dashboard" | "appConfig" | "users" | "org" | "audit"; // ✅ novo
+type PageKey = "dashboard" | "appConfig" | "users" | "org" | "history" | "audit";
 
 type Me = {
   id: string;
@@ -80,7 +81,7 @@ export default function App() {
                 padding: "10px 12px",
                 borderRadius: 12,
                 border: "1px solid rgba(255,255,255,0.22)",
-                background: "rgba(0,0,0,0.20)",
+                background: "rgba(255, 0, 0, 0.83)",
                 color: "#fff",
                 cursor: "pointer",
                 fontWeight: 800,
@@ -109,13 +110,12 @@ export default function App() {
               Dashboard
             </button>
             <button onClick={() => setPage("appConfig")} style={tabBtn(page === "appConfig")}>
-              Config do App
+              Config App
             </button>
             <button onClick={() => setPage("users")} style={tabBtn(page === "users")}>
               Usuários
             </button>
 
-            {/* ✅ novo */}
             <button onClick={() => setPage("org")} style={tabBtn(page === "org")}>
               Empresas/Setores
             </button>
@@ -124,13 +124,17 @@ export default function App() {
               Auditoria
             </button>
 
+            <button onClick={() => setPage("history")} style={tabBtn(page === "history")}>
+              Históricos
+            </button>
+
             <button
               onClick={logout}
               style={{
                 padding: "10px 12px",
                 borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.22)",
-                background: "rgba(0,0,0,0.20)",
+                border: "1px solid rgba(2, 2, 2, 0.66)",
+                background: "rgba(255, 0, 0, 0.83)",
                 color: "#fff",
                 cursor: "pointer",
                 fontWeight: 800,
@@ -150,7 +154,9 @@ export default function App() {
         ) : page === "users" ? (
           <AdminUsersPage />
         ) : page === "org" ? (
-          <AdminOrgPage /> // ✅ novo
+          <AdminOrgPage />
+        ) : page === "history" ? (
+          <AdminHistoryPage />
         ) : (
           <AdminAuditPage />
         )}

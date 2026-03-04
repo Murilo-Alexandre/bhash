@@ -109,7 +109,7 @@ export function FirstLoginChangePasswordPage({ onDone }: { onDone: () => void })
                 padding: 12,
                 borderRadius: 12,
                 fontWeight: 800,
-                background: "transparent",
+                background: "rgba(255, 0, 0, 0.83)",
                 color: "var(--fg)",
                 border: "1px solid var(--border)",
                 cursor: "pointer",

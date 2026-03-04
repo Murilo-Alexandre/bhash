@@ -29,6 +29,7 @@ import { MeController } from './me/me.controller';
 import { AdminOrgController } from './admin/admin-org.controller';
 
 import { AdminUsersController } from './admin/admin-users.controller';
+import { AdminHistoryModule } from './admin-history/admin-history.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { AdminUsersController } from './admin/admin-users.controller';
     MessagesModule,
     ChatModule,
     AppConfigModule,
+    AdminHistoryModule,
   ],
   controllers: [
     AppController,

@@ -26,7 +26,7 @@ export function TopNav({
           gap: 12,
           padding: "12px 14px",
           borderRadius: 18,
-          border: "1px solid rgba(255,255,255,0.12)",
+          border: "1px solid rgba(252, 0, 0, 0.12)",
           background: `
             linear-gradient(
               180deg,
@@ -50,7 +50,7 @@ export function TopNav({
               {title}
             </div>
             {subtitle ? (
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", marginTop: 2, whiteSpace: "nowrap" }}>
+              <div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.78)", marginTop: 2, whiteSpace: "nowrap" }}>
                 {subtitle}
               </div>
             ) : null}

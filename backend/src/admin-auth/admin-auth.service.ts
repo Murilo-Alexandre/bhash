@@ -41,6 +41,7 @@ export class AdminAuthService {
         name: admin.name,
         isSuperAdmin: admin.isSuperAdmin,
         mustChangeCredentials: admin.mustChangeCredentials,
+        mustChangePassword: admin.mustChangePassword, // ✅ add
       },
     };
   }

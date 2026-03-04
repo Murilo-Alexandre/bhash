@@ -39,7 +39,6 @@ export class ChatGateway {
     this.jwtSecret = secret;
   }
 
-  // Autentica na conexão: cliente envia token em handshake.auth.token
   async handleConnection(client: Socket) {
     try {
       const token = client.handshake.auth?.token;
@@ -47,47 +46,64 @@ export class ChatGateway {
 
       const payload = await this.jwt.verifyAsync(token, { secret: this.jwtSecret });
 
-      // ✅ só aceita token de USER (chat). Admin não conecta no WS.
-      if (payload?.type !== 'user') throw new Error('invalid token type');
+      // ✅ aceita user e admin
+      const type = payload?.type;
+      if (type !== 'user' && type !== 'admin') throw new Error('invalid token type');
 
-      const userId = payload.sub as string;
-      if (!userId) throw new Error('missing sub');
+      const sub = payload?.sub as string;
+      if (!sub) throw new Error('missing sub');
 
-      client.data.userId = userId;
+      client.data.authType = type;
 
-      // sala do usuário (útil pra notificações diretas no futuro)
-      client.join(`user:${userId}`);
+      if (type === 'user') {
+        client.data.userId = sub;
+        client.join(`user:${sub}`);
+        client.emit('connected', { ok: true, type: 'user', userId: sub });
+        return;
+      }
 
-      client.emit('connected', { ok: true, userId });
+      // admin
+      client.data.adminId = sub;
+      client.join(`admin:${sub}`);
+      client.emit('connected', { ok: true, type: 'admin', adminId: sub });
     } catch (e: any) {
       client.emit('connected', { ok: false, reason: e?.message ?? 'unauthorized' });
       client.disconnect(true);
     }
   }
 
-  // cliente chama: socket.emit('conversation:join', { conversationId })
+  // user ou admin podem entrar na sala da conversa
   @SubscribeMessage('conversation:join')
   async joinConversation(
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { conversationId: string },
   ) {
-    const userId = client.data.userId as string;
-    if (!userId) return { ok: false, reason: 'unauthenticated' };
+    const authType = client.data.authType as string | undefined;
+    if (!authType) return { ok: false, reason: 'unauthenticated' };
     if (!body?.conversationId) return { ok: false, reason: 'missing conversationId' };
 
-    // valida membership: tenta listar 1 msg
-    await this.messages.list(userId, body.conversationId, undefined, '1');
+    if (authType === 'user') {
+      const userId = client.data.userId as string;
+      // valida membership do user
+      await this.messages.list(userId, body.conversationId, undefined, '1');
+      client.join(`conv:${body.conversationId}`);
+      return { ok: true };
+    }
 
+    // admin: entra direto (admin pode ver tudo)
     client.join(`conv:${body.conversationId}`);
     return { ok: true };
   }
 
-  // cliente chama: socket.emit('message:send', { conversationId, body })
+  // ✅ somente user pode enviar mensagem
   @SubscribeMessage('message:send')
   async sendMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { conversationId: string; body: string },
   ) {
+    const authType = client.data.authType as string | undefined;
+    if (authType !== 'user') return { ok: false, reason: 'forbidden' };
+
     const userId = client.data.userId as string;
     if (!userId) return { ok: false, reason: 'unauthenticated' };
     if (!data?.conversationId) return { ok: false, reason: 'missing conversationId' };
@@ -97,7 +113,6 @@ export class ChatGateway {
 
     const msg = await this.messages.send(userId, data.conversationId, body);
 
-    // envia pros membros conectados na conversa
     this.server.to(`conv:${data.conversationId}`).emit('message:new', msg);
 
     return { ok: true, id: msg.id };

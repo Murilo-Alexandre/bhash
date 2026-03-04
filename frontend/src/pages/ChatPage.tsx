@@ -266,7 +266,7 @@ export function ChatPage() {
               padding: "10px 12px",
               borderRadius: 12,
               border: "1px solid rgba(255,255,255,0.22)",
-              background: "rgba(0,0,0,0.20)",
+              background: "rgba(255, 0, 0, 0.83)",
               color: "#fff",
               cursor: "pointer",
               fontWeight: 800,
