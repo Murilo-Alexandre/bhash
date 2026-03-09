@@ -170,8 +170,9 @@ export class AdminHistoryService {
     });
 
     const nextCursor = messages.length === pageSize ? messages[messages.length - 1].id : null;
+    const items = messages.reverse().map((m) => ({ ...m, body: m.body ?? '' }));
 
-    return { ok: true, items: messages.reverse(), nextCursor };
+    return { ok: true, items, nextCursor };
   }
 
   // =========================
@@ -277,10 +278,19 @@ export class AdminHistoryService {
       include: { sender: { select: { id: true, username: true, name: true } } },
     });
 
+    if (!anchorFull) {
+      throw new BadRequestException('Mensagem âncora não encontrada nesta conversa');
+    }
+
+    const normalizeBody = <T extends { body: string | null }>(message: T) => ({
+      ...message,
+      body: message.body ?? '',
+    });
+
     return {
       ok: true,
       anchorId: anchor.id,
-      items: [...before.reverse(), anchorFull, ...after],
+      items: [...before.reverse(), anchorFull, ...after].map(normalizeBody),
     };
   }
 

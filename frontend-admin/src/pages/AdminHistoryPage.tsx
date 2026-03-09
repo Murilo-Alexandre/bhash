@@ -37,7 +37,7 @@ type Message = {
   createdAt: string;
   conversationId: string;
   senderId: string;
-  body: string;
+  body: string | null;
   sender: { id: string; username: string; name: string };
 };
 
@@ -225,8 +225,8 @@ export function AdminHistoryPage() {
   const [contactsMsg, setContactsMsg] = useState<string | null>(null);
 
   // filtros opcionais (se quiser usar depois)
-  const [companyId, setCompanyId] = useState("");
-  const [departmentId, setDepartmentId] = useState("");
+  const [companyId] = useState("");
+  const [departmentId] = useState("");
 
   // ====== BUSCA GLOBAL ======
   const [globalQ, setGlobalQ] = useState("");
@@ -1095,9 +1095,9 @@ export function AdminHistoryPage() {
                         >
                           <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35, paddingRight: 54 }}>
                             {highlightTerm.trim() ? (
-                              <HighlightText text={m.body} query={highlightTerm.trim()} />
+                              <HighlightText text={m.body ?? ""} query={highlightTerm.trim()} />
                             ) : (
-                              m.body
+                              m.body ?? ""
                             )}
                           </div>
 
@@ -1203,7 +1203,7 @@ export function AdminHistoryPage() {
                             </div>
 
                             <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.35, whiteSpace: "pre-wrap" }}>
-                              <HighlightText text={m.body} query={chatSearchQ.trim()} />
+                              <HighlightText text={m.body ?? ""} query={chatSearchQ.trim()} />
                             </div>
                           </button>
                         );

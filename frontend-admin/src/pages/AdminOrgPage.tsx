@@ -9,6 +9,15 @@ type OrgItem = {
   createdAt: string;
 };
 
+const PT_BR_COLLATOR = new Intl.Collator("pt-BR", {
+  sensitivity: "base",
+  numeric: true,
+});
+
+function compareAlpha(a?: string | null, b?: string | null) {
+  return PT_BR_COLLATOR.compare((a ?? "").trim(), (b ?? "").trim());
+}
+
 export function AdminOrgPage() {
   const { api } = useAdminAuth();
 
@@ -29,7 +38,7 @@ export function AdminOrgPage() {
     setMsg(null);
     try {
       const res = await api.get<{ ok: boolean; items: OrgItem[] }>(basePath);
-      setItems(res.data.items ?? []);
+      setItems([...(res.data.items ?? [])].sort((a, b) => compareAlpha(a.name, b.name)));
     } catch (e: any) {
       setMsg(e?.response?.data?.message ?? "Falha ao carregar");
     } finally {
@@ -93,32 +102,33 @@ export function AdminOrgPage() {
           }
         >
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder={tab === "companies" ? "Buscar empresa…" : "Buscar setor…"}
-              style={{
-                flex: 1,
-                minWidth: 260,
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--input-border)",
-                background: "var(--input-bg)",
-                color: "var(--input-fg)",
-                outline: "none",
-              }}
-            />
+            <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
+              <span className="admin-searchField__icon" aria-hidden="true">
+                <SearchIcon />
+              </span>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={tab === "companies" ? "Buscar empresa..." : "Buscar setor..."}
+                className="admin-searchField__input"
+              />
+            </div>
           </div>
 
           {msg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{msg}</div> : null}
 
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720, tableLayout: "fixed" }}>
+              <colgroup>
+                <col />
+                <col style={{ width: 230 }} />
+                <col style={{ width: 150 }} />
+              </colgroup>
               <thead>
-                <tr style={{ textAlign: "left" }}>
+                <tr>
                   <Th>Nome</Th>
-                  <Th>Criado</Th>
-                  <Th style={{ textAlign: "right" }}>Ações</Th>
+                  <Th style={{ textAlign: "center" }}>Criado</Th>
+                  <Th style={{ textAlign: "center" }}>Ações</Th>
                 </tr>
               </thead>
 
@@ -139,17 +149,19 @@ export function AdminOrgPage() {
                   filtered.map((it) => (
                     <tr key={it.id} style={{ borderTop: "1px solid var(--border)" }}>
                       <Td style={{ fontWeight: 900 }}>{it.name}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{fmt(it.createdAt)}</Td>
+                      <Td style={{ color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap" }}>
+                        {fmt(it.createdAt)}
+                      </Td>
 
-                      <Td style={{ textAlign: "right" }}>
-                        <div style={{ display: "inline-flex", gap: 10 }}>
-                          <IconButton title="Editar" onClick={() => setEditItem(it)}>
+                      <Td style={{ textAlign: "center" }}>
+                        <div style={{ display: "inline-flex", gap: 10, justifyContent: "center" }}>
+                          <IconButton title="Editar" onClick={() => setEditItem(it)} tone="neutral">
                             <IconPencil />
                           </IconButton>
 
                           <IconButton
                             title="Excluir"
-                            danger
+                            tone="danger"
                             onClick={async () => {
                               const ok = confirm(`Excluir "${it.name}"? Essa ação não pode ser desfeita.`);
                               if (!ok) return;
@@ -253,7 +265,7 @@ function Td(props: any) {
       {...props}
       style={{
         padding: "14px 10px",
-        verticalAlign: "top",
+        verticalAlign: "middle",
         ...props.style,
       }}
     />
@@ -283,29 +295,19 @@ function fmt(d: string) {
 function IconButton({
   title,
   onClick,
-  danger,
+  tone = "neutral",
   children,
 }: {
   title: string;
   onClick: () => void;
-  danger?: boolean;
+  tone?: "neutral" | "danger";
   children: React.ReactNode;
 }) {
   return (
     <button
       title={title}
       onClick={onClick}
-      style={{
-        width: 42,
-        height: 42,
-        display: "grid",
-        placeItems: "center",
-        borderRadius: 12,
-        border: "1px solid var(--border)",
-        background: "transparent",
-        color: danger ? "#ffb4b4" : "var(--fg)",
-        cursor: "pointer",
-      }}
+      className={`admin-actionBtn ${tone === "danger" ? "is-danger" : ""}`}
     >
       {children}
     </button>
@@ -470,15 +472,33 @@ function OrgModal({
 }
 
 /** ===== ÍCONES (SVG) — sem emoji ===== */
+function SearchIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+      <path d="m20 20-3.6-3.6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function IconPencil() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 20h9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       <path
-        d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4L16.5 3.5Z"
+        d="M3 20.5 4.55 15l9.9-9.9a2.25 2.25 0 0 1 3.18 0l1.27 1.27a2.25 2.25 0 0 1 0 3.18L9 19.45 3 20.5Z"
+        fill="currentColor"
+      />
+      <path
+        d="m14.98 7.26 3.76 3.76"
         stroke="currentColor"
-        strokeWidth="2"
-        strokeLinejoin="round"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        opacity="0.55"
+      />
+      <path
+        d="m6.9 17.1 2.98-.6-2.38-2.38-.6 2.98Z"
+        fill="currentColor"
+        opacity="0.55"
       />
     </svg>
   );
@@ -487,11 +507,10 @@ function IconPencil() {
 function IconTrash() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M8 6V4h8v2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
-      <path d="M7 6l1 16h8l1-16" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
-      <path d="M10 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M4 7h16" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M9 3h6a1 1 0 0 1 1 1v3H8V4a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
+      <path d="m6 7 1 12a2 2 0 0 0 2 1.8h6a2 2 0 0 0 2-1.8L18 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }

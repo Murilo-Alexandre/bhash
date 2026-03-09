@@ -71,25 +71,14 @@ export default function App() {
           title="BHASH • Admin"
           subtitle="Painel administrativo"
           theme={theme}
-          onToggleTheme={toggle}
-          logoSrc={logoUrl}
-          rightSlot={
-            <button
-              onClick={logout}
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.22)",
-                background: "rgba(255, 0, 0, 0.83)",
-                color: "#fff",
-                cursor: "pointer",
-                fontWeight: 800,
-              }}
-            >
-              Sair
-            </button>
-          }
-        />
+        onToggleTheme={toggle}
+        logoSrc={logoUrl}
+        rightSlot={
+          <button onClick={logout} className="admin-logoutBtn">
+            Sair
+          </button>
+        }
+      />
         <AdminFirstLoginPage />
       </div>
     );
@@ -104,37 +93,46 @@ export default function App() {
         onToggleTheme={toggle}
         logoSrc={logoUrl}
         rightSlot={
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <button onClick={() => setPage("dashboard")} style={tabBtn(page === "dashboard")}>
+          <div className="admin-navActions">
+            <button
+              onClick={() => setPage("dashboard")}
+              className={`admin-navBtn ${page === "dashboard" ? "is-active" : ""}`}
+              aria-current={page === "dashboard" ? "page" : undefined}
+            >
               Dashboard
             </button>
-            <button onClick={() => setPage("appConfig")} style={tabBtn(page === "appConfig")}>
+            <button
+              onClick={() => setPage("appConfig")}
+              className={`admin-navBtn ${page === "appConfig" ? "is-active" : ""}`}
+              aria-current={page === "appConfig" ? "page" : undefined}
+            >
               Config App
             </button>
-            <button onClick={() => setPage("users")} style={tabBtn(page === "users")}>
+            <button
+              onClick={() => setPage("users")}
+              className={`admin-navBtn ${page === "users" ? "is-active" : ""}`}
+              aria-current={page === "users" ? "page" : undefined}
+            >
               Usuários
             </button>
 
-            <button onClick={() => setPage("org")} style={tabBtn(page === "org")}>
+            <button
+              onClick={() => setPage("org")}
+              className={`admin-navBtn ${page === "org" ? "is-active" : ""}`}
+              aria-current={page === "org" ? "page" : undefined}
+            >
               Empresas/Setores
             </button>
 
-            <button onClick={() => setPage("history")} style={tabBtn(page === "history")}>
+            <button
+              onClick={() => setPage("history")}
+              className={`admin-navBtn ${page === "history" ? "is-active" : ""}`}
+              aria-current={page === "history" ? "page" : undefined}
+            >
               Históricos
             </button>
 
-            <button
-              onClick={logout}
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid rgba(2, 2, 2, 0.66)",
-                background: "rgba(255, 0, 0, 0.83)",
-                color: "#fff",
-                cursor: "pointer",
-                fontWeight: 800,
-              }}
-            >
+            <button onClick={logout} className="admin-logoutBtn">
               Sair
             </button>
           </div>
@@ -156,16 +154,4 @@ export default function App() {
       </div>
     </div>
   );
-}
-
-function tabBtn(active: boolean): React.CSSProperties {
-  return {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.22)",
-    background: active ? "rgba(0,0,0,0.28)" : "rgba(0,0,0,0.14)",
-    color: "#fff",
-    cursor: "pointer",
-    fontWeight: 800,
-  };
 }

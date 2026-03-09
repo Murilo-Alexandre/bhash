@@ -121,6 +121,10 @@ export class ChatGateway implements OnGatewayInit {
     });
 
     this.events.emitMessageNew(data.conversationId, msg);
+    const participantIds = await this.messages.getConversationParticipantIds(data.conversationId);
+    for (const participantId of participantIds) {
+      this.events.emitConversationsSync(participantId, { conversationId: data.conversationId });
+    }
 
     return { ok: true, id: msg.id };
   }

@@ -112,6 +112,10 @@ export class MessagesController {
     });
 
     this.events.emitMessageNew(conversationId, msg);
+    const participantIds = await this.messages.getConversationParticipantIds(conversationId);
+    for (const participantId of participantIds) {
+      this.events.emitConversationsSync(participantId, { conversationId });
+    }
 
     return { ok: true, message: msg };
   }
@@ -138,12 +142,44 @@ export class MessagesController {
     return { ok: true, message: result.message };
   }
 
+
+  @Post('messages/hide-many')
+  async removeMany(@Req() req: any, @Body() body: { messageIds: string[] }) {
+    const result = await this.messages.removeMany(req.user.sub, body?.messageIds ?? []);
+    if (result.conversationId) {
+      this.events.emitMessagesHidden(result.conversationId, {
+        userId: req.user.sub,
+        messageIds: result.messageIds,
+      });
+      this.events.emitConversationsSync(req.user.sub, {
+        conversationId: result.conversationId,
+        force: true,
+      });
+    }
+    return { ok: true };
+  }
+
+  @Post('conversations/:id/clear')
+  async clearConversation(@Req() req: any, @Param('id') conversationId: string) {
+    const result = await this.messages.clearConversation(req.user.sub, conversationId);
+    this.events.emitConversationCleared(result.conversationId, { userId: req.user.sub });
+    this.events.emitConversationsSync(req.user.sub, {
+      conversationId: result.conversationId,
+      force: true,
+    });
+    return { ok: true };
+  }
+
   @Delete('messages/:id')
   async remove(@Req() req: any, @Param('id') messageId: string) {
     const result = await this.messages.remove(req.user.sub, messageId);
-    this.events.emitMessageDeleted(result.conversationId, {
-      id: result.messageId,
-      deletedAt: result.deletedAt,
+    this.events.emitMessageHidden(result.conversationId, {
+      userId: req.user.sub,
+      messageId: result.messageId,
+    });
+    this.events.emitConversationsSync(req.user.sub, {
+      conversationId: result.conversationId,
+      force: true,
     });
     return { ok: true };
   }

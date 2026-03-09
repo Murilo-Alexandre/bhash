@@ -37,6 +37,22 @@ export class ConversationsService {
     };
   }
 
+  private async assertMember(myId: string, conversationId: string) {
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, OR: [{ userAId: myId }, { userBId: myId }] },
+      select: { id: true },
+    });
+
+    if (!conv) throw new BadRequestException('Conversa não encontrada');
+    return conv;
+  }
+
+  private rankTimestamp(conv: { updatedAt?: string | Date; createdAt?: string | Date }) {
+    const updated = conv.updatedAt ? new Date(conv.updatedAt).getTime() : 0;
+    const created = conv.createdAt ? new Date(conv.createdAt).getTime() : 0;
+    return Number.isFinite(updated) && updated > 0 ? updated : created;
+  }
+
   async getOrCreateDirect(myId: string, otherUserId: string) {
     if (!otherUserId || otherUserId === myId) {
       throw new BadRequestException('otherUserId inválido');
@@ -79,29 +95,36 @@ export class ConversationsService {
       },
     });
 
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId: conv.id, userId: myId } },
+      update: { hidden: false },
+      create: { conversationId: conv.id, userId: myId, hidden: false },
+    });
+
     return { ok: true, conversation: conv };
   }
 
   async listMine(myId: string, q?: string) {
     const query = (q ?? '').trim();
+    const membershipFilter = { OR: [{ userAId: myId }, { userBId: myId }] };
+    const queryFilter = query
+      ? {
+          OR: [
+            { userA: { name: { contains: query, mode: 'insensitive' as const } } },
+            { userA: { username: { contains: query, mode: 'insensitive' as const } } },
+            { userA: { email: { contains: query, mode: 'insensitive' as const } } },
+            { userB: { name: { contains: query, mode: 'insensitive' as const } } },
+            { userB: { username: { contains: query, mode: 'insensitive' as const } } },
+            { userB: { email: { contains: query, mode: 'insensitive' as const } } },
+          ],
+        }
+      : null;
 
     const rows = await this.prisma.conversation.findMany({
       where: {
-        OR: [{ userAId: myId }, { userBId: myId }],
-        ...(query
-          ? {
-              OR: [
-                { userA: { name: { contains: query, mode: 'insensitive' } } },
-                { userA: { username: { contains: query, mode: 'insensitive' } } },
-                { userA: { email: { contains: query, mode: 'insensitive' } } },
-                { userB: { name: { contains: query, mode: 'insensitive' } } },
-                { userB: { username: { contains: query, mode: 'insensitive' } } },
-                { userB: { email: { contains: query, mode: 'insensitive' } } },
-              ],
-            }
-          : {}),
+        AND: [membershipFilter, ...(queryFilter ? [queryFilter] : [])],
+        states: { none: { userId: myId, hidden: true } },
       },
-      orderBy: { updatedAt: 'desc' },
       include: {
         userA: {
           select: {
@@ -127,32 +150,102 @@ export class ConversationsService {
             department: { select: { id: true, name: true } },
           },
         },
-        messages: {
+        states: {
+          where: { userId: myId },
           take: 1,
-          orderBy: { createdAt: 'desc' },
-          select: this.messageSelect(myId),
         },
       },
     });
 
-    const items = rows.map((conv) => {
-      const otherUser = conv.userA.id === myId ? conv.userB : conv.userA;
-      const lastMessage = conv.messages[0] ?? null;
+    const items = await Promise.all(
+      rows.map(async (conv) => {
+        const otherUser = conv.userA.id === myId ? conv.userB : conv.userA;
+        const state = (conv.states[0] as any) ?? null;
+        const pinned = !!state?.pinned;
 
-      return {
-        id: conv.id,
-        createdAt: conv.createdAt,
-        updatedAt: conv.updatedAt,
-        otherUser,
-        lastMessage: lastMessage
-          ? {
-              ...lastMessage,
-              isFavorited: lastMessage.favorites.length > 0,
-            }
-          : null,
-      };
+        const lastMessage = await this.prisma.message.findFirst({
+          where: {
+            conversationId: conv.id,
+            hiddenForUsers: { none: { userId: myId } },
+            ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: this.messageSelect(myId),
+        });
+
+        const unreadCount = await this.prisma.message.count({
+          where: {
+            conversationId: conv.id,
+            senderId: { not: myId },
+            hiddenForUsers: { none: { userId: myId } },
+            ...(state?.lastReadAt ? { createdAt: { gt: state.lastReadAt } } : {}),
+            ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+          },
+        });
+
+        return {
+          id: conv.id,
+          createdAt: conv.createdAt,
+          updatedAt: lastMessage?.createdAt ?? conv.updatedAt,
+          otherUser,
+          pinned,
+          unreadCount,
+          lastMessage: lastMessage
+            ? {
+                ...lastMessage,
+                isFavorited: lastMessage.favorites.length > 0,
+              }
+            : null,
+        };
+      }),
+    );
+
+    items.sort((a, b) => {
+      const pinDiff = Number(!!b.pinned) - Number(!!a.pinned);
+      if (pinDiff !== 0) return pinDiff;
+      return this.rankTimestamp(b) - this.rankTimestamp(a);
     });
 
     return { ok: true, items };
+  }
+
+  async markAsRead(myId: string, conversationId: string) {
+    await this.assertMember(myId, conversationId);
+
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId, userId: myId } },
+      update: { lastReadAt: new Date(), hidden: false },
+      create: { conversationId, userId: myId, lastReadAt: new Date(), hidden: false },
+    });
+
+    return { ok: true };
+  }
+
+  async hideConversation(myId: string, conversationId: string) {
+    await this.markAsRead(myId, conversationId);
+
+    await this.prisma.conversationUserState.update({
+      where: { conversationId_userId: { conversationId, userId: myId } },
+      data: { hidden: true },
+    });
+
+    return { ok: true };
+  }
+
+  async setPinned(myId: string, conversationId: string, value: boolean) {
+    await this.assertMember(myId, conversationId);
+
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId, userId: myId } },
+      update: { pinned: !!value, hidden: false } as any,
+      create: {
+        conversationId,
+        userId: myId,
+        pinned: !!value,
+        hidden: false,
+      } as any,
+    });
+
+    return { ok: true, pinned: !!value };
   }
 }

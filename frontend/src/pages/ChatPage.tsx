@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { Socket } from "socket.io-client";
 import { useAuth } from "../auth";
@@ -76,6 +76,8 @@ type ConversationListItem = {
   updatedAt?: string;
   otherUser: UserMini;
   lastMessage?: Message | null;
+  unreadCount?: number;
+  pinned?: boolean;
 };
 
 type SearchHit = Message;
@@ -166,27 +168,176 @@ const EMOJIS = [
   "😁",
   "😂",
   "🤣",
+  "😃",
+  "😄",
+  "😅",
+  "😆",
+  "😉",
   "😊",
+  "🙂",
+  "🙃",
   "😍",
+  "🥰",
   "😘",
+  "😗",
+  "😙",
+  "😚",
+  "😋",
+  "😛",
+  "😝",
+  "😜",
+  "🤪",
+  "🤨",
+  "🧐",
+  "🤓",
   "😎",
+  "🥸",
+  "🤩",
+  "🥳",
+  "😏",
+  "😒",
+  "🙄",
+  "😬",
+  "🤥",
+  "🤭",
+  "🤫",
   "🤔",
+  "🫡",
+  "😶",
+  "🫥",
+  "😐",
+  "😑",
+  "😴",
+  "😪",
+  "😵",
+  "🤯",
+  "😱",
+  "😨",
+  "😰",
+  "😥",
   "😢",
   "😭",
+  "😤",
+  "😠",
   "😡",
+  "🤬",
+  "🥺",
+  "😮",
+  "😯",
+  "😲",
+  "🥱",
+  "😇",
   "👍",
   "👎",
   "👏",
   "🙌",
   "🙏",
+  "🤝",
+  "👊",
+  "✊",
+  "🤞",
+  "👌",
+  "🤌",
+  "🤏",
+  "✌️",
+  "🤟",
+  "🤘",
+  "👋",
+  "🫶",
+  "💪",
+  "🧠",
   "🔥",
   "❤️",
+  "🧡",
+  "💜",
+  "🖤",
+  "🤍",
+  "🤎",
   "💙",
   "💚",
   "💛",
+  "💔",
+  "❣️",
+  "💕",
+  "💞",
+  "💓",
+  "💗",
+  "💖",
+  "💘",
+  "💝",
+  "⭐",
+  "🌟",
+  "✨",
+  "⚡",
+  "💥",
+  "💫",
   "🎉",
+  "🎊",
+  "🎯",
+  "🏆",
+  "🥇",
   "🚀",
+  "🛠️",
+  "💼",
+  "📌",
+  "📎",
+  "💡",
+  "☕",
+  "🍕",
+  "🍔",
+  "🌮",
+  "🍟",
+  "🍿",
+  "🍰",
+  "🍩",
+  "🍪",
+  "🍎",
+  "🍓",
+  "🍉",
+  "🍺",
+  "🍷",
+  "🥤",
+  "⚽",
+  "🏀",
+  "🏐",
+  "🎮",
+  "🎵",
+  "🎧",
+  "📷",
+  "📱",
+  "💻",
+  "✅",
+  "❌",
+  "⚠️",
+  "❓",
+  "❗",
+  "✔️",
+  "➕",
+  "➖",
+  "➡️",
+  "⬅️",
+  "⬆️",
+  "⬇️",
+  "😺",
+  "😸",
+  "😹",
+  "😻",
+  "😼",
+  "🙈",
+  "🙉",
+  "🙊",
 ];
+
+const QUICK_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+const PT_BR_COLLATOR = new Intl.Collator("pt-BR", {
+  sensitivity: "base",
+  numeric: true,
+});
+
+function compareAlpha(a?: string | null, b?: string | null) {
+  return PT_BR_COLLATOR.compare((a ?? "").trim(), (b ?? "").trim());
+}
 
 function normalizeText(v: string) {
   return v
@@ -257,6 +408,21 @@ function toAbsoluteUrl(url?: string | null) {
   if (/^(https?:)?\/\//i.test(url) || url.startsWith("data:") || url.startsWith("blob:")) return url;
   if (url.startsWith("/")) return `${API_BASE}${url}`;
   return `${API_BASE}/${url}`;
+}
+
+function conversationRankTimestamp(conv: ConversationListItem) {
+  const raw = conv.lastMessage?.createdAt ?? conv.updatedAt ?? conv.createdAt;
+  if (!raw) return 0;
+  const ts = new Date(raw).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function sortConversationItems(items: ConversationListItem[]) {
+  return [...items].sort((a, b) => {
+    const pinDiff = Number(!!b.pinned) - Number(!!a.pinned);
+    if (pinDiff !== 0) return pinDiff;
+    return conversationRankTimestamp(b) - conversationRankTimestamp(a);
+  });
 }
 
 function escapeRegExp(v: string) {
@@ -444,6 +610,95 @@ function CloseIcon() {
   );
 }
 
+function ArrowDownIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M6 9l6 6 6-6"
+        stroke="currentColor"
+        strokeWidth="2.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronLeftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+      <path d="M15 5 8 12l7 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+      <path d="m9 5 7 7-7 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ZoomInIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M11 8v6M8 11h6M16 16l4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ZoomOutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M8 11h6M16 16l4.5 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ResetZoomIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M5 12a7 7 0 1 0 2.05-4.95" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M5 6v3.8h3.8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path
+        d="M12 8.5A3.5 3.5 0 1 1 8.5 12 3.5 3.5 0 0 1 12 8.5Z"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path
+        d="M19.4 13.5a7.9 7.9 0 0 0 .05-3l1.76-1.37-1.9-3.28-2.16.64a8 8 0 0 0-2.6-1.5L14.2 2h-4.4l-.39 2.99a8 8 0 0 0-2.6 1.5l-2.16-.64-1.9 3.28L4.5 10.5a7.9 7.9 0 0 0 0 3l-1.76 1.37 1.9 3.28 2.16-.64a8 8 0 0 0 2.6 1.5L9.8 22h4.4l.39-2.99a8 8 0 0 0 2.6-1.5l2.16.64 1.9-3.28-1.85-1.37Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PinIcon({ filled = false }: { filled?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" fill={filled ? "currentColor" : "none"} aria-hidden="true">
+      <path
+        d="M15 4v4l3 3v1H6v-1l3-3V4h6Zm-3 8v8"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function ChatPage() {
   const { logout, api, token } = useAuth();
   const { theme, toggleTheme, resolvedLogoUrl } = useTheme();
@@ -457,6 +712,7 @@ export function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [messagesNextCursor, setMessagesNextCursor] = useState<string | null>(null);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [messagesErr, setMessagesErr] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
   const [text, setText] = useState("");
@@ -484,6 +740,15 @@ export function ChatPage() {
   const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
 
   const [actionMenuMsgId, setActionMenuMsgId] = useState<string | null>(null);
+  const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
+  const [reactionBarMsgId, setReactionBarMsgId] = useState<string | null>(null);
+  const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
+
+  const [multiDeleteMode, setMultiDeleteMode] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
+  const [newMsgsCount, setNewMsgsCount] = useState(0);
+  const [showJumpNew, setShowJumpNew] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -491,17 +756,47 @@ export function ChatPage() {
   const [profileMediaTab, setProfileMediaTab] = useState<"image" | "file">("image");
   const [profileMediaItems, setProfileMediaItems] = useState<MediaItem[]>([]);
   const [profileMediaLoading, setProfileMediaLoading] = useState(false);
+  const [myInfoOpen, setMyInfoOpen] = useState(false);
+
+  const [imageViewerOpen, setImageViewerOpen] = useState(false);
+  const [imageViewerItems, setImageViewerItems] = useState<MediaItem[]>([]);
+  const [imageViewerIndex, setImageViewerIndex] = useState(0);
+  const [imageViewerZoom, setImageViewerZoom] = useState(1);
+  const [imageViewerOffset, setImageViewerOffset] = useState({ x: 0, y: 0 });
+  const [imageViewerDragging, setImageViewerDragging] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
+  const conversationsRef = useRef<ConversationListItem[]>([]);
+  const convListRef = useRef<HTMLDivElement | null>(null);
+  const convPositionsRef = useRef<Map<string, number>>(new Map());
   const msgListRef = useRef<HTMLDivElement | null>(null);
+  const composerInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const myAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const searchDebounceRef = useRef<number | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
+  const meIdRef = useRef<string | null>(null);
+  const imageViewerConvIdRef = useRef<string | null>(null);
+  const imageViewerDragRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
 
   useEffect(() => {
     activeConvIdRef.current = activeConv?.id ?? null;
   }, [activeConv?.id]);
+
+  useEffect(() => {
+    meIdRef.current = me?.id ?? null;
+  }, [me?.id]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   useEffect(() => {
     return () => {
@@ -515,6 +810,9 @@ export function ChatPage() {
     function closeMenus() {
       setActionMenuMsgId(null);
       setEmojiOpen(false);
+      setConversationMenuId(null);
+      setReactionBarMsgId(null);
+      setReactionPickerMsgId(null);
     }
     window.addEventListener("click", closeMenus);
     return () => window.removeEventListener("click", closeMenus);
@@ -524,6 +822,12 @@ export function ChatPage() {
     requestAnimationFrame(() => {
       const el = msgListRef.current;
       if (el) el.scrollTop = el.scrollHeight;
+    });
+  }
+
+  function focusComposerInput() {
+    requestAnimationFrame(() => {
+      composerInputRef.current?.focus({ preventScroll: true });
     });
   }
 
@@ -538,8 +842,91 @@ export function ChatPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
+  function resetImageViewerTransform() {
+    setImageViewerZoom(1);
+    setImageViewerOffset({ x: 0, y: 0 });
+    setImageViewerDragging(false);
+    imageViewerDragRef.current = null;
+  }
+
+  function clampZoom(value: number) {
+    return Math.max(1, Math.min(5, value));
+  }
+
+  function normalizeMediaImageItems(items: MediaItem[]) {
+    return [...items]
+      .filter((item) => item.contentType === "IMAGE" && !!item.attachmentUrl)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  }
+
+  async function loadConversationImagesForViewer(conversationId: string) {
+    if (!conversationId) return [];
+    const res = await api.get<MediaResponse>(`/conversations/${conversationId}/media`, {
+      params: { kind: "image" },
+    });
+    return normalizeMediaImageItems(res.data.items ?? []);
+  }
+
+  function resolveViewerIndex(items: MediaItem[], targetMessageId: string) {
+    const exact = items.findIndex((item) => item.id === targetMessageId);
+    if (exact >= 0) return exact;
+    return 0;
+  }
+
+  async function openImageViewer(message: Message) {
+    const conversationId = activeConv?.id;
+    const imageUrl = toAbsoluteUrl(message.attachmentUrl);
+    if (!conversationId || !imageUrl) return;
+
+    const fromCurrentMessages = normalizeMediaImageItems(messages);
+    const fallbackItems = fromCurrentMessages.length ? fromCurrentMessages : [message];
+    const fallbackIndex = resolveViewerIndex(fallbackItems, message.id);
+
+    setImageViewerItems(fallbackItems);
+    setImageViewerIndex(fallbackIndex);
+    setImageViewerOpen(true);
+    resetImageViewerTransform();
+
+    const shouldReload = imageViewerConvIdRef.current !== conversationId;
+
+    if (!shouldReload) return;
+
+    try {
+      const remoteItems = await loadConversationImagesForViewer(conversationId);
+      if (!remoteItems.length) return;
+      setImageViewerItems(remoteItems);
+      setImageViewerIndex(resolveViewerIndex(remoteItems, message.id));
+      imageViewerConvIdRef.current = conversationId;
+    } catch {
+      imageViewerConvIdRef.current = conversationId;
+    }
+  }
+
+  function closeImageViewer() {
+    setImageViewerOpen(false);
+    resetImageViewerTransform();
+  }
+
+  function goToImage(offset: number) {
+    setImageViewerIndex((prev) => {
+      const next = prev + offset;
+      if (next < 0 || next >= imageViewerItems.length) return prev;
+      return next;
+    });
+  }
+
+  function setViewerZoom(nextZoom: number) {
+    setImageViewerZoom(clampZoom(nextZoom));
+    if (nextZoom <= 1) {
+      setImageViewerOffset({ x: 0, y: 0 });
+    }
+  }
+
   function openActionMenu(e: ReactMouseEvent, messageId: string) {
     e.stopPropagation();
+    setConversationMenuId(null);
+    setReactionBarMsgId(null);
+    setReactionPickerMsgId(null);
     setActionMenuMsgId((prev) => (prev === messageId ? null : messageId));
   }
 
@@ -557,24 +944,6 @@ export function ChatPage() {
     });
   }
 
-  function markMessageDeleted(messageId: string, deletedAt?: string) {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === messageId
-          ? {
-              ...m,
-              body: "Mensagem apagada",
-              deletedAt: deletedAt ?? new Date().toISOString(),
-              attachmentUrl: null,
-              attachmentName: null,
-              attachmentMime: null,
-              attachmentSize: null,
-              contentType: "TEXT",
-            }
-          : m
-      )
-    );
-  }
 
   async function loadMe() {
     const res = await api.get<Me>("/auth/me");
@@ -585,7 +954,7 @@ export function ChatPage() {
     setLoadingConvs(true);
     try {
       const res = await api.get<ConversationsResponse>("/conversations");
-      const items = res.data.items ?? [];
+      const items = sortConversationItems(res.data.items ?? []);
       setConversations(items);
 
       if (selectConversationId) {
@@ -601,6 +970,7 @@ export function ChatPage() {
     if (!conversationId) return;
 
     setLoadingMsgs(true);
+    setMessagesErr(null);
     try {
       const res = await api.get<MessagesResponse>(`/conversations/${conversationId}/messages`, {
         params: {
@@ -627,6 +997,9 @@ export function ChatPage() {
       setMessagesNextCursor(res.data.nextCursor ?? null);
 
       if (!appendTop) scrollToBottom();
+    } catch (e: any) {
+      if (!appendTop) setMessages([]);
+      setMessagesErr(e?.response?.data?.message ?? "Falha ao carregar mensagens");
     } finally {
       setLoadingMsgs(false);
     }
@@ -639,13 +1012,25 @@ export function ChatPage() {
     setSearchHits([]);
     setSearchErr(null);
     setHighlightTerm("");
+    setMessagesErr(null);
     setReplyTo(null);
     setActionMenuMsgId(null);
+    setConversationMenuId(null);
     clearComposerAttachment();
+    setConversations((prev) =>
+      sortConversationItems(
+        prev.map((item) =>
+          item.id === conv.id ? { ...item, unreadCount: 0 } : item
+        )
+      )
+    );
 
     socketRef.current?.emit("conversation:join", { conversationId: conv.id });
 
     await loadMessages(conv.id);
+    await markConversationRead(conv.id);
+    setNewMsgsCount(0);
+    setShowJumpNew(false);
   }
 
   async function loadUsers() {
@@ -722,7 +1107,7 @@ export function ChatPage() {
     }
   }
 
-  async function jumpToHit(hit: SearchHit) {
+  async function jumpToMessageById(messageId: string, termToHighlight = "") {
     if (!activeConv?.id) return;
 
     try {
@@ -730,7 +1115,7 @@ export function ChatPage() {
         `/conversations/${activeConv.id}/messages/around`,
         {
           params: {
-            messageId: hit.id,
+            messageId,
             take: 80,
           },
         }
@@ -739,13 +1124,13 @@ export function ChatPage() {
       const items = res.data.items ?? [];
       setMessages(items);
       setMessagesNextCursor(null);
-      setHighlightTerm(searchQ.trim());
+      setHighlightTerm(termToHighlight);
 
       requestAnimationFrame(() => {
         const container = msgListRef.current;
         if (!container) return;
 
-        const row = container.querySelector(`[data-mid="${hit.id}"]`) as HTMLElement | null;
+        const row = container.querySelector(`[data-mid="${messageId}"]`) as HTMLElement | null;
         if (row) {
           row.scrollIntoView({ behavior: "smooth", block: "center" });
           row.classList.add("chat-msg-flash");
@@ -755,6 +1140,10 @@ export function ChatPage() {
     } catch (e: any) {
       setSearchErr(e?.response?.data?.message ?? "Falha ao abrir ocorrência");
     }
+  }
+
+  async function jumpToHit(hit: SearchHit) {
+    await jumpToMessageById(hit.id, searchQ.trim());
   }
 
   async function loadProfileDrawer() {
@@ -847,13 +1236,14 @@ export function ChatPage() {
     const trimmed = text.trim();
     const hasText = !!trimmed;
     const hasAttachment = !!attachmentFile;
+    const conversationId = activeConv.id;
 
     if (!hasText && !hasAttachment) return;
-    if (sending) return;
 
-    setSending(true);
-    try {
-      if (hasAttachment) {
+    if (hasAttachment) {
+      if (sending) return;
+      setSending(true);
+      try {
         const form = new FormData();
         if (trimmed) form.append("body", trimmed);
         form.append("file", attachmentFile as File);
@@ -861,7 +1251,7 @@ export function ChatPage() {
         if (replyTo?.id) form.append("replyToId", replyTo.id);
 
         const res = await api.post<{ ok: true; message: Message }>(
-          `/conversations/${activeConv.id}/messages`,
+          `/conversations/${conversationId}/messages`,
           form,
           {
             headers: { "Content-Type": "multipart/form-data" },
@@ -870,22 +1260,28 @@ export function ChatPage() {
 
         mergeMessageIntoList(res.data.message);
         scrollToBottom();
-      } else {
-        socketRef.current?.emit("message:send", {
-          conversationId: activeConv.id,
-          body: trimmed,
-          replyToId: replyTo?.id ?? null,
-        });
+        setShowJumpNew(false);
+        setNewMsgsCount(0);
+      } finally {
+        setSending(false);
       }
-
-      setText("");
-      setReplyTo(null);
-      clearComposerAttachment();
-      setEmojiOpen(false);
-      await loadConversations(activeConv.id);
-    } finally {
-      setSending(false);
+    } else {
+      socketRef.current?.emit("message:send", {
+        conversationId,
+        body: trimmed,
+        replyToId: replyTo?.id ?? null,
+      });
+      scrollToBottom();
+      setShowJumpNew(false);
+      setNewMsgsCount(0);
     }
+
+    setText("");
+    setReplyTo(null);
+    clearComposerAttachment();
+    setEmojiOpen(false);
+    focusComposerInput();
+    void loadConversations(conversationId);
   }
 
   async function toggleFavorite(message: Message) {
@@ -912,12 +1308,102 @@ export function ChatPage() {
     } catch {}
   }
 
-  async function deleteMessage(messageId: string) {
+  async function deleteSelectedMessages() {
+    if (!selectedMessageIds.length) return;
     try {
-      await api.delete(`/messages/${messageId}`);
-      markMessageDeleted(messageId);
+      await api.post('/messages/hide-many', { messageIds: selectedMessageIds });
+      setMessages((prev) => prev.filter((m) => !selectedMessageIds.includes(m.id)));
+      setSelectedMessageIds([]);
+      setMultiDeleteMode(false);
     } catch {}
   }
+
+  async function clearConversation(conversationId?: string) {
+    const targetId = conversationId ?? activeConv?.id;
+    if (!targetId) return;
+
+    try {
+      await api.post(`/conversations/${targetId}/clear`);
+      setConversationMenuId(null);
+      setConversations((prev) =>
+        sortConversationItems(
+          prev.map((conv) =>
+            conv.id === targetId
+              ? { ...conv, lastMessage: null, unreadCount: 0 }
+              : conv
+          )
+        )
+      );
+
+      if (activeConvIdRef.current === targetId) {
+        setMessages([]);
+        setNewMsgsCount(0);
+        setShowJumpNew(false);
+      }
+
+      await loadConversations(activeConvIdRef.current ?? undefined);
+    } catch {}
+  }
+
+  async function removeConversationFromList(conversationId?: string) {
+    const targetId = conversationId ?? activeConv?.id;
+    if (!targetId) return;
+
+    try {
+      await api.delete(`/conversations/${targetId}`);
+      setConversations((prev) => prev.filter((c) => c.id !== targetId));
+      setConversationMenuId(null);
+
+      if (activeConvIdRef.current === targetId) {
+        setActiveConv(null);
+        setMessages([]);
+        setNewMsgsCount(0);
+        setShowJumpNew(false);
+      }
+    } catch {}
+  }
+
+  async function markConversationRead(conversationId: string) {
+    try {
+      await api.patch(`/conversations/${conversationId}/read`);
+      setConversations((prev) =>
+        sortConversationItems(
+          prev.map((conv) =>
+            conv.id === conversationId ? { ...conv, unreadCount: 0 } : conv
+          )
+        )
+      );
+    } catch {}
+  }
+
+  async function setConversationPinned(conversationId: string, value: boolean) {
+    try {
+      await api.patch(`/conversations/${conversationId}/pin`, { value });
+      setConversations((prev) =>
+        sortConversationItems(
+          prev.map((conv) => (conv.id === conversationId ? { ...conv, pinned: value } : conv))
+        )
+      );
+      if (activeConvIdRef.current === conversationId) {
+        setActiveConv((prev) => (prev ? { ...prev, pinned: value } : prev));
+      }
+      setConversationMenuId(null);
+    } catch {}
+  }
+
+  async function uploadMyAvatar(file: File) {
+    const form = new FormData();
+    form.append("file", file);
+    setAvatarUploading(true);
+    try {
+      await api.post('/me/avatar', form, { headers: { "Content-Type": "multipart/form-data" } });
+      await loadMe();
+      await loadConversations(activeConvIdRef.current ?? undefined);
+    } finally {
+      setAvatarUploading(false);
+    }
+  }
+
 
   function groupedMessages(items: Message[]) {
     const out: Array<{ kind: "sep"; label: string } | { kind: "msg"; value: Message }> = [];
@@ -961,47 +1447,84 @@ export function ChatPage() {
   }, [users, userSearch, userCompanyFilter, userDepartmentFilter]);
 
   const groupedUsers = useMemo(() => {
-    const map = new Map<string, UserMini[]>();
+    const companyMap = new Map<string, Map<string, UserMini[]>>();
 
     for (const user of usersFiltered) {
       const company = user.company?.name ?? "Sem empresa";
       const department = user.department?.name ?? "Sem setor";
-      const key = `${company}|||${department}`;
-      const list = map.get(key) ?? [];
+      const byDept = companyMap.get(company) ?? new Map<string, UserMini[]>();
+      const list = byDept.get(department) ?? [];
       list.push(user);
-      map.set(key, list);
+      byDept.set(department, list);
+      companyMap.set(company, byDept);
     }
 
-    return Array.from(map.entries())
-      .map(([key, list]) => {
-        const [company, department] = key.split("|||");
-        return {
-          company,
-          department,
-          users: list.sort((a, b) => a.name.localeCompare(b.name)),
-        };
-      })
-      .sort((a, b) => {
-        if (a.company !== b.company) return a.company.localeCompare(b.company);
-        return a.department.localeCompare(b.department);
-      });
+    return Array.from(companyMap.entries())
+      .map(([company, depts]) => ({
+        company,
+        departments: Array.from(depts.entries())
+          .map(([department, deptUsers]) => ({
+            department,
+            users: deptUsers.sort((a, b) => {
+              const byName = compareAlpha(a.name || a.username, b.name || b.username);
+              if (byName !== 0) return byName;
+              return compareAlpha(a.email, b.email);
+            }),
+          }))
+          .sort((a, b) => compareAlpha(a.department, b.department)),
+      }))
+      .sort((a, b) => compareAlpha(a.company, b.company));
   }, [usersFiltered]);
 
   const companyOptions = useMemo(() => {
-    return Array.from(new Set(users.map((u) => u.company?.name).filter(Boolean) as string[])).sort((a, b) =>
-      a.localeCompare(b)
-    );
+    return Array.from(new Set(users.map((u) => u.company?.name).filter(Boolean) as string[])).sort(compareAlpha);
   }, [users]);
 
   const departmentOptions = useMemo(() => {
-    return Array.from(new Set(users.map((u) => u.department?.name).filter(Boolean) as string[])).sort((a, b) =>
-      a.localeCompare(b)
-    );
+    return Array.from(new Set(users.map((u) => u.department?.name).filter(Boolean) as string[])).sort(compareAlpha);
   }, [users]);
 
   const favoriteMessages = useMemo(() => {
     return messages.filter((m) => m.isFavorited);
   }, [messages]);
+
+  const currentViewerItem = imageViewerItems[imageViewerIndex] ?? null;
+  const currentViewerUrl = toAbsoluteUrl(currentViewerItem?.attachmentUrl);
+  const canViewPrev = imageViewerIndex > 0;
+  const canViewNext = imageViewerIndex < imageViewerItems.length - 1;
+
+  useLayoutEffect(() => {
+    const container = convListRef.current;
+    if (!container) return;
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>("[data-conv-id]"));
+    const nextPositions = new Map<string, number>();
+
+    for (const row of rows) {
+      const id = row.dataset.convId;
+      if (!id) continue;
+      nextPositions.set(id, row.getBoundingClientRect().top);
+    }
+
+    for (const row of rows) {
+      const id = row.dataset.convId;
+      if (!id) continue;
+
+      const prevTop = convPositionsRef.current.get(id);
+      const nextTop = nextPositions.get(id);
+      if (prevTop == null || nextTop == null) continue;
+
+      const deltaY = prevTop - nextTop;
+      if (Math.abs(deltaY) < 1) continue;
+
+      row.animate(
+        [{ transform: `translateY(${deltaY}px)` }, { transform: "translateY(0)" }],
+        { duration: 190, easing: "cubic-bezier(0.2, 0.7, 0.2, 1)" }
+      );
+    }
+
+    convPositionsRef.current = nextPositions;
+  }, [conversations]);
 
   useEffect(() => {
     if (!token) return;
@@ -1011,18 +1534,48 @@ export function ChatPage() {
 
     s.on("message:new", (msg: Message) => {
       const currentConvId = activeConvIdRef.current;
-      if (!currentConvId || msg.conversationId !== currentConvId) return;
+      const isActive = !!currentConvId && msg.conversationId === currentConvId;
+      const isMine = !!meIdRef.current && msg.senderId === meIdRef.current;
+      const hadConversation = conversationsRef.current.some(
+        (conv) => conv.id === msg.conversationId
+      );
 
-      mergeMessageIntoList(msg);
-
-      requestAnimationFrame(() => {
-        const el = msgListRef.current;
-        if (!el) return;
-        const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-        if (distanceFromBottom < 140) el.scrollTop = el.scrollHeight;
+      setConversations((prev) => {
+        if (!prev.length) return prev;
+        const next = prev.map((conv) => {
+          if (conv.id !== msg.conversationId) return conv;
+          return {
+            ...conv,
+            lastMessage: msg,
+            updatedAt: msg.createdAt,
+            unreadCount: isActive ? 0 : isMine ? conv.unreadCount ?? 0 : (conv.unreadCount ?? 0) + 1,
+          };
+        });
+        return sortConversationItems(next);
       });
 
-      void loadConversations(currentConvId);
+      if (isActive) {
+        mergeMessageIntoList(msg);
+
+        requestAnimationFrame(() => {
+          const el = msgListRef.current;
+          if (!el) return;
+          const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+          if (isMine || distanceFromBottom < 140) {
+            el.scrollTop = el.scrollHeight;
+            setShowJumpNew(false);
+            setNewMsgsCount(0);
+          } else {
+            setShowJumpNew(true);
+            setNewMsgsCount((prev) => prev + 1);
+          }
+        });
+        if (!isMine) void markConversationRead(msg.conversationId);
+      }
+
+      if (!hadConversation) {
+        void loadConversations(currentConvId ?? undefined);
+      }
     });
 
     s.on("message:updated", (msg: Message) => {
@@ -1031,8 +1584,48 @@ export function ChatPage() {
       mergeMessageIntoList(msg);
     });
 
-    s.on("message:deleted", (payload: { id: string; deletedAt?: string }) => {
-      markMessageDeleted(payload.id, payload.deletedAt);
+    s.on("message:hidden", (payload: { messageId: string; conversationId: string }) => {
+      if (payload.conversationId === activeConvIdRef.current) {
+        setMessages((prev) => prev.filter((m) => m.id !== payload.messageId));
+      }
+    });
+
+    s.on("messages:hidden", (payload: { messageIds: string[]; conversationId: string }) => {
+      if (payload.conversationId === activeConvIdRef.current) {
+        setMessages((prev) => prev.filter((m) => !payload.messageIds.includes(m.id)));
+      }
+    });
+
+    s.on("conversation:cleared", (payload: { conversationId: string }) => {
+      if (payload.conversationId === activeConvIdRef.current) setMessages([]);
+    });
+
+    s.on("conversation:hidden", (payload: { conversationId: string }) => {
+      setConversations((prev) => prev.filter((conv) => conv.id !== payload.conversationId));
+      if (payload.conversationId === activeConvIdRef.current) {
+        setActiveConv(null);
+        setMessages([]);
+        setNewMsgsCount(0);
+        setShowJumpNew(false);
+      }
+    });
+
+    s.on("conversations:sync", (payload?: { conversationId?: string | null; force?: boolean }) => {
+      if (payload?.force) {
+        void loadConversations(activeConvIdRef.current ?? undefined);
+        return;
+      }
+
+      const conversationId = payload?.conversationId ?? null;
+      if (!conversationId) {
+        void loadConversations(activeConvIdRef.current ?? undefined);
+        return;
+      }
+
+      const hasConversation = conversationsRef.current.some((conv) => conv.id === conversationId);
+      if (!hasConversation) {
+        void loadConversations(activeConvIdRef.current ?? undefined);
+      }
     });
 
     return () => {
@@ -1055,11 +1648,61 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickerOpen]);
 
+  useEffect(() => {
+    if (!imageViewerOpen) return;
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeImageViewer();
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        goToImage(-1);
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        goToImage(1);
+        return;
+      }
+      if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        setViewerZoom(imageViewerZoom + 0.2);
+        return;
+      }
+      if (e.key === "-") {
+        e.preventDefault();
+        setViewerZoom(imageViewerZoom - 0.2);
+        return;
+      }
+      if (e.key === "0") {
+        e.preventDefault();
+        resetImageViewerTransform();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [imageViewerOpen, imageViewerZoom, imageViewerItems.length]);
+
+  useEffect(() => {
+    if (!imageViewerOpen) return;
+    resetImageViewerTransform();
+  }, [imageViewerIndex, imageViewerOpen]);
+
+  useEffect(() => {
+    closeImageViewer();
+    imageViewerConvIdRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConv?.id]);
+
   return (
     <div className="chat-shell">
       <TopNav
         title="BHASH • Chat"
-        subtitle={me ? `${me.username}` : ""}
+        subtitle={me ? `${me.name}` : ""}
         theme={theme}
         onToggleTheme={toggleTheme}
         logoSrc={resolvedLogoUrl}
@@ -1074,13 +1717,18 @@ export function ChatPage() {
         <aside className="chat-sidebar">
           <div className="chat-sidebar__header">
             <div className="chat-sidebar__title">Conversas</div>
-            <button className="chat-primaryIconBtn" onClick={() => setPickerOpen(true)} title="Nova conversa">
-              <PlusIcon />
-              <span>Nova</span>
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="chat-iconBtn" onClick={() => setMyInfoOpen(true)} title="Minhas informações">
+                <GearIcon />
+              </button>
+              <button className="chat-primaryIconBtn" onClick={() => setPickerOpen(true)} title="Nova conversa">
+                <PlusIcon />
+                <span>Nova</span>
+              </button>
+            </div>
           </div>
 
-          <div className="chat-sidebar__list">
+          <div className="chat-sidebar__list" ref={convListRef}>
             {loadingConvs ? (
               <div className="chat-empty">Carregando conversas…</div>
             ) : conversations.length === 0 ? (
@@ -1092,23 +1740,73 @@ export function ChatPage() {
                 const avatar = toAbsoluteUrl(other.avatarUrl);
 
                 return (
-                  <button
-                    key={conv.id}
-                    className={`chat-convCard ${active ? "is-active" : ""}`}
-                    onClick={() => void openConversation(conv)}
-                  >
-                    <div className="chat-avatar chat-avatar--md">
-                      {avatar ? <img src={avatar} alt={other.name} /> : <span>{other.name.slice(0, 1).toUpperCase()}</span>}
-                    </div>
-
-                    <div className="chat-convCard__main">
-                      <div className="chat-convCard__name">{other.name}</div>
-                      <div className="chat-convCard__meta">
-                        {other.department?.name ?? "Sem setor"}
-                        {other.company?.name ? ` • ${other.company.name}` : ""}
+                  <div key={conv.id} className="chat-convCardWrap" data-conv-id={conv.id}>
+                    <button
+                      className={`chat-convCard ${active ? "is-active" : ""}`}
+                      onClick={() => void openConversation(conv)}
+                    >
+                      <div className="chat-avatar chat-avatar--md">
+                        {avatar ? (
+                          <img src={avatar} alt={other.name} />
+                        ) : (
+                          <span>{other.name.slice(0, 1).toUpperCase()}</span>
+                        )}
                       </div>
-                    </div>
-                  </button>
+
+                      <div className="chat-convCard__main">
+                        <div className="chat-convCard__nameRow">
+                          <span className="chat-convCard__name">{other.name}</span>
+                          {conv.pinned ? <span className="chat-convPinnedTag">Fixada</span> : null}
+                        </div>
+                        <div className="chat-convCard__meta">
+                          {conv.lastMessage?.body?.trim() ||
+                            (conv.lastMessage?.contentType === "IMAGE"
+                              ? "Imagem"
+                              : conv.lastMessage?.contentType === "FILE"
+                              ? conv.lastMessage?.attachmentName || "Arquivo"
+                              : `${other.department?.name ?? "Sem setor"}${other.company?.name ? ` • ${other.company.name}` : ""}`)}
+                        </div>
+                      </div>
+                      {conv.unreadCount ? <span className="chat-unreadBadge">{conv.unreadCount}</span> : null}
+                    </button>
+
+                    <button
+                      className={`chat-convMenuBtn ${conversationMenuId === conv.id ? "is-open" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActionMenuMsgId(null);
+                        setReactionBarMsgId(null);
+                        setReactionPickerMsgId(null);
+                        setConversationMenuId((prev) => (prev === conv.id ? null : conv.id));
+                      }}
+                      title="Ações da conversa"
+                    >
+                      <DotsIcon />
+                    </button>
+
+                    {conversationMenuId === conv.id ? (
+                      <div className="chat-convMenu" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          className="chat-msgMenu__item"
+                          onClick={() => void setConversationPinned(conv.id, !conv.pinned)}
+                        >
+                          <PinIcon filled={!!conv.pinned} />
+                          <span>{conv.pinned ? "Desafixar conversa" : "Fixar conversa"}</span>
+                        </button>
+                        <button className="chat-msgMenu__item" onClick={() => void clearConversation(conv.id)}>
+                          <TrashIcon />
+                          <span>Limpar conversa</span>
+                        </button>
+                        <button
+                          className="chat-msgMenu__item chat-msgMenu__item--danger"
+                          onClick={() => void removeConversationFromList(conv.id)}
+                        >
+                          <CloseIcon />
+                          <span>Remover dos chats</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 );
               })
             )}
@@ -1160,13 +1858,20 @@ export function ChatPage() {
             ) : null}
           </div>
 
-          <div className={searchOpen ? "chat-content chat-content--withSearch" : "chat-content"}>
+          <div className="chat-thread">
+            <div className={searchOpen ? "chat-content chat-content--withSearch" : "chat-content"}>
             <div
               ref={msgListRef}
               className="chat-messageList"
               onScroll={() => {
                 const el = msgListRef.current;
-                if (!el || !activeConv?.id || !messagesNextCursor || loadingMsgs) return;
+                if (!el) return;
+                const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+                if (distanceFromBottom < 120) {
+                  setShowJumpNew(false);
+                  setNewMsgsCount(0);
+                }
+                if (!activeConv?.id || !messagesNextCursor || loadingMsgs) return;
                 if (el.scrollTop < 120) {
                   void loadMessages(activeConv.id, messagesNextCursor, true);
                 }
@@ -1176,6 +1881,8 @@ export function ChatPage() {
                 <div className="chat-empty">Abra uma conversa para ver as mensagens.</div>
               ) : loadingMsgs && messages.length === 0 ? (
                 <div className="chat-empty">Carregando mensagens…</div>
+              ) : messagesErr && messages.length === 0 ? (
+                <div className="chat-error">{messagesErr}</div>
               ) : (
                 <>
                   {messagesNextCursor ? <div className="chat-topHint">Role para cima para carregar mais</div> : null}
@@ -1200,8 +1907,23 @@ export function ChatPage() {
                         <div
                           key={msg.id}
                           data-mid={msg.id}
-                          className={`chat-msgRow ${isMine ? "is-mine" : "is-other"}`}
+                          className={`chat-msgRow ${isMine ? "is-mine" : "is-other"} ${
+                            actionMenuMsgId === msg.id ? "is-menu-open" : ""
+                          } ${
+                            reactions.length ? "has-reactions" : ""
+                          }`}
                         >
+                          {multiDeleteMode ? (
+                            <input
+                              type="checkbox"
+                              checked={selectedMessageIds.includes(msg.id)}
+                              onChange={() =>
+                                setSelectedMessageIds((prev) =>
+                                  prev.includes(msg.id) ? prev.filter((id) => id !== msg.id) : [...prev, msg.id]
+                                )
+                              }
+                            />
+                          ) : null}
                           <div className={`chat-bubble ${isMine ? "is-mine" : "is-other"}`}>
                             {!msg.deletedAt ? (
                               <button
@@ -1219,6 +1941,8 @@ export function ChatPage() {
                                   className="chat-msgMenu__item"
                                   onClick={() => {
                                     setReplyTo(msg);
+                                    setReactionBarMsgId(null);
+                                    setReactionPickerMsgId(null);
                                     setActionMenuMsgId(null);
                                   }}
                                 >
@@ -1229,12 +1953,76 @@ export function ChatPage() {
                                 <button
                                   className="chat-msgMenu__item"
                                   onClick={() => {
+                                    setReactionBarMsgId((prev) => (prev === msg.id ? null : msg.id));
+                                    setReactionPickerMsgId(null);
+                                  }}
+                                >
+                                  <SmileIcon />
+                                  <span>Reagir</span>
+                                </button>
+
+                                {reactionBarMsgId === msg.id ? (
+                                  <div className="chat-msgMenu__reactionBar">
+                                    {QUICK_REACTION_EMOJIS.map((emoji) => (
+                                      <button
+                                        key={`${msg.id}-quick-${emoji}`}
+                                        className="chat-msgMenu__reactionPill"
+                                        onClick={() => {
+                                          void reactToMessage(msg, emoji);
+                                          setReactionBarMsgId(null);
+                                          setReactionPickerMsgId(null);
+                                          setActionMenuMsgId(null);
+                                        }}
+                                        title={`Reagir com ${emoji}`}
+                                      >
+                                        {emoji}
+                                      </button>
+                                    ))}
+                                    <button
+                                      className={`chat-msgMenu__reactionMore ${
+                                        reactionPickerMsgId === msg.id ? "is-open" : ""
+                                      }`}
+                                      onClick={() =>
+                                        setReactionPickerMsgId((prev) => (prev === msg.id ? null : msg.id))
+                                      }
+                                      title="Mais reações"
+                                    >
+                                      <PlusIcon />
+                                    </button>
+                                  </div>
+                                ) : null}
+
+                                {reactionBarMsgId === msg.id && reactionPickerMsgId === msg.id ? (
+                                  <div className="chat-msgMenu__emojiGrid">
+                                    {EMOJIS.map((emoji) => (
+                                      <button
+                                        key={`${msg.id}-full-${emoji}`}
+                                        className="chat-msgMenu__emojiBtn"
+                                        onClick={() => {
+                                          void reactToMessage(msg, emoji);
+                                          setReactionBarMsgId(null);
+                                          setReactionPickerMsgId(null);
+                                          setActionMenuMsgId(null);
+                                        }}
+                                        title={`Reagir com ${emoji}`}
+                                      >
+                                        {emoji}
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : null}
+
+                                <button
+                                  className="chat-msgMenu__item"
+                                  onClick={() => {
                                     const content =
                                       msg.body?.trim() ||
                                       msg.attachmentUrl ||
                                       msg.attachmentName ||
                                       "";
                                     if (content) copyText(content);
+                                    setReactionBarMsgId(null);
+                                    setReactionPickerMsgId(null);
                                     setActionMenuMsgId(null);
                                   }}
                                 >
@@ -1246,6 +2034,8 @@ export function ChatPage() {
                                   className="chat-msgMenu__item"
                                   onClick={() => {
                                     void toggleFavorite(msg);
+                                    setReactionBarMsgId(null);
+                                    setReactionPickerMsgId(null);
                                     setActionMenuMsgId(null);
                                   }}
                                 >
@@ -1253,33 +2043,19 @@ export function ChatPage() {
                                   <span>{msg.isFavorited ? "Desfavoritar" : "Favoritar"}</span>
                                 </button>
 
-                                <div className="chat-msgMenu__reactions">
-                                  {EMOJIS.slice(0, 8).map((emoji) => (
-                                    <button
-                                      key={`${msg.id}-${emoji}`}
-                                      className="chat-reactionQuickBtn"
-                                      onClick={() => {
-                                        void reactToMessage(msg, emoji);
-                                        setActionMenuMsgId(null);
-                                      }}
-                                    >
-                                      {emoji}
-                                    </button>
-                                  ))}
-                                </div>
-
-                                {isMine ? (
-                                  <button
-                                    className="chat-msgMenu__item chat-msgMenu__item--danger"
-                                    onClick={() => {
-                                      void deleteMessage(msg.id);
-                                      setActionMenuMsgId(null);
-                                    }}
-                                  >
-                                    <TrashIcon />
-                                    <span>Apagar</span>
-                                  </button>
-                                ) : null}
+                                <button
+                                  className="chat-msgMenu__item chat-msgMenu__item--danger"
+                                  onClick={() => {
+                                    setMultiDeleteMode(true);
+                                    setSelectedMessageIds([msg.id]);
+                                    setReactionBarMsgId(null);
+                                    setReactionPickerMsgId(null);
+                                    setActionMenuMsgId(null);
+                                  }}
+                                >
+                                  <TrashIcon />
+                                  <span>Apagar</span>
+                                </button>
                               </div>
                             ) : null}
 
@@ -1293,14 +2069,14 @@ export function ChatPage() {
                             ) : null}
 
                             {msg.contentType === "IMAGE" && imageUrl ? (
-                              <a
-                                href={imageUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="chat-imageLink"
+                              <button
+                                type="button"
+                                className="chat-imageLink chat-imageLink--btn"
+                                onClick={() => void openImageViewer(msg)}
+                                title="Abrir imagem"
                               >
                                 <img src={imageUrl} alt={msg.attachmentName ?? "imagem"} className="chat-imagePreview" />
-                              </a>
+                              </button>
                             ) : null}
 
                             {msg.contentType === "FILE" && imageUrl ? (
@@ -1449,6 +2225,35 @@ export function ChatPage() {
             ) : null}
           </div>
 
+            {showJumpNew ? (
+              <button
+                className="chat-jumpNewBtn"
+                onClick={() => {
+                  scrollToBottom();
+                  setShowJumpNew(false);
+                  setNewMsgsCount(0);
+                }}
+                title="Ir para mensagens novas"
+              >
+                <span className="chat-jumpNewBtn__icon" aria-hidden="true">
+                  <ArrowDownIcon />
+                </span>
+                <span>{newMsgsCount > 99 ? "99+" : newMsgsCount} {newMsgsCount === 1 ? "nova" : "novas"}</span>
+              </button>
+            ) : null}
+
+            {multiDeleteMode ? (
+              <div className="chat-multiDeleteBar">
+                <span>{selectedMessageIds.length} selecionada(s)</span>
+                <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setMultiDeleteMode(false)}>
+                  <CloseIcon />
+                </button>
+                <button className="chat-primaryBtn" onClick={() => void deleteSelectedMessages()}>
+                  Confirmar exclusão
+                </button>
+              </div>
+            ) : null}
+
           <div className="chat-composerWrap">
             {replyTo ? (
               <div className="chat-replyComposer">
@@ -1531,6 +2336,7 @@ export function ChatPage() {
 
               <div className="chat-composer__inputWrap">
                 <input
+                  ref={composerInputRef}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   placeholder={activeConv ? "Digite sua mensagem..." : "Selecione uma conversa..."}
@@ -1568,8 +2374,71 @@ export function ChatPage() {
               </button>
             </div>
           </div>
+          </div>
         </main>
       </div>
+
+      {myInfoOpen ? (
+        <div className="chat-modalBackdrop" onClick={() => setMyInfoOpen(false)}>
+          <div className="chat-profileDrawer" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-profileDrawer__header">
+              <div className="chat-profileDrawer__title">Minhas informações</div>
+              <button className="chat-iconBtn" onClick={() => setMyInfoOpen(false)}>
+                <CloseIcon />
+              </button>
+            </div>
+
+            <div className="chat-profileDrawer__body">
+              <div className="chat-contactCard">
+                <div className="chat-avatar chat-avatar--xl">
+                  {toAbsoluteUrl(me?.avatarUrl) ? (
+                    <img src={toAbsoluteUrl(me?.avatarUrl) ?? ""} alt={me?.name ?? "Meu perfil"} />
+                  ) : (
+                    <span>{(me?.name ?? "U").slice(0, 1).toUpperCase()}</span>
+                  )}
+                </div>
+
+                <div className="chat-contactCard__name">{me?.name ?? "Usuário"}</div>
+              </div>
+
+              <div className="chat-sectionTitle">Dados do perfil</div>
+              <div className="chat-contactCard__info chat-contactCard__info--left">
+                <div><strong>Nome:</strong> {me?.name ?? "-"}</div>
+                <div><strong>E-mail:</strong> {me?.email || "Sem e-mail"}</div>
+                <div><strong>Empresa:</strong> {me?.company?.name ?? "Sem empresa"}</div>
+                <div><strong>Setor:</strong> {me?.department?.name ?? "Sem setor"}</div>
+                <div><strong>Ramal:</strong> {me?.extension || "Sem ramal"}</div>
+                <div><strong>Foto de perfil:</strong> {me?.avatarUrl ? "Enviada" : "Sem foto"}</div>
+              </div>
+
+              <div className="chat-myInfoActions">
+                <button
+                  className="chat-primaryBtn"
+                  onClick={() => myAvatarInputRef.current?.click()}
+                  disabled={avatarUploading}
+                >
+                  {avatarUploading
+                    ? "Enviando..."
+                    : me?.avatarUrl
+                    ? "Alterar foto existente"
+                    : "Enviar nova foto"}
+                </button>
+                <input
+                  ref={myAvatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void uploadMyAvatar(file);
+                    e.currentTarget.value = "";
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {pickerOpen ? (
         <div className="chat-modalBackdrop" onClick={() => setPickerOpen(false)}>
@@ -1625,45 +2494,192 @@ export function ChatPage() {
                 <div className="chat-empty">Nenhum colaborador encontrado.</div>
               ) : (
                 groupedUsers.map((group) => (
-                  <div key={`${group.company}-${group.department}`} className="chat-userGroup">
-                    <div className="chat-userGroup__header">
-                      <div className="chat-userGroup__company">{group.company}</div>
-                      <div className="chat-userGroup__department">{group.department}</div>
-                    </div>
+                  <div key={group.company} className="chat-userGroup">
+                    <div className="chat-userGroup__companyBar">{group.company}</div>
 
-                    <div className="chat-userGroup__list">
-                      {group.users.map((user) => (
-                        <div key={user.id} className="chat-userRow">
-                          <div className="chat-userRow__main">
-                            <div className="chat-userRow__name">{user.name}</div>
-                            <div className="chat-userRow__meta">
-                              <span>{user.email || "Sem e-mail"}</span>
-                              <span>{user.extension ? `Ramal: ${user.extension}` : "Sem ramal"}</span>
+                    {group.departments.map((dept) => (
+                      <div key={`${group.company}-${dept.department}`} className="chat-userDeptBlock">
+                        <div className="chat-userGroup__departmentBar">{dept.department}</div>
+                        <div className="chat-userGroup__list">
+                          {dept.users.map((user) => (
+                            <div
+                              key={user.id}
+                              className="chat-userRow"
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => void startDirect(user.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  void startDirect(user.id);
+                                }
+                              }}
+                            >
+                              <div className="chat-userCell chat-userCell--name">
+                                <div className="chat-avatar chat-avatar--sm">
+                                  {toAbsoluteUrl(user.avatarUrl) ? (
+                                    <img src={toAbsoluteUrl(user.avatarUrl) ?? ""} alt={user.name} />
+                                  ) : (
+                                    <span>{user.name.slice(0, 1).toUpperCase()}</span>
+                                  )}
+                                </div>
+                                <div className="chat-userRow__identity">
+                                  <span className="chat-userFieldLabel">Nome:</span>
+                                  <span className="chat-userRow__name">{user.name}</span>
+                                </div>
+                              </div>
+
+                              <div className="chat-userCell chat-userCell--email">
+                                <span className="chat-userFieldLabel">E-mail:</span>
+                                <div className="chat-userEmailWrap">
+                                  <span className="chat-userEmailText">{user.email || "Sem e-mail"}</span>
+                                  <button
+                                    className="chat-iconBtn chat-iconBtn--sm"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (user.email) copyText(user.email);
+                                    }}
+                                    title={user.email ? "Copiar e-mail" : "Sem e-mail para copiar"}
+                                    disabled={!user.email}
+                                  >
+                                    <CopyIcon />
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="chat-userCell chat-userCell--ext">
+                                <span className="chat-userFieldLabel">Ramal:</span>
+                                <span className="chat-userExtText">{user.extension || "Sem ramal"}</span>
+                              </div>
                             </div>
-                          </div>
-
-                          <div className="chat-userRow__actions">
-                            {user.email ? (
-                              <button
-                                className="chat-iconBtn chat-iconBtn--sm"
-                                onClick={() => copyText(user.email ?? "")}
-                                title="Copiar e-mail"
-                              >
-                                <CopyIcon />
-                              </button>
-                            ) : null}
-
-                            <button className="chat-primaryBtn" onClick={() => void startDirect(user.id)}>
-                              Abrir chat
-                            </button>
-                          </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                      </div>
+                    ))}
                   </div>
                 ))
               )}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {imageViewerOpen ? (
+        <div className="chat-imageViewer" onClick={closeImageViewer}>
+          <div className="chat-imageViewer__topBar" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-imageViewer__meta">
+              <div className="chat-imageViewer__title">
+                {currentViewerItem?.attachmentName || "Imagem"}
+              </div>
+              <div className="chat-imageViewer__sub">
+                {imageViewerItems.length
+                  ? `${imageViewerIndex + 1} de ${imageViewerItems.length}`
+                  : "Sem imagens"}
+                {currentViewerItem?.createdAt ? ` • ${fmtDateTime(currentViewerItem.createdAt)}` : ""}
+              </div>
+            </div>
+
+            <div className="chat-imageViewer__actions">
+              <button
+                className="chat-iconBtn"
+                onClick={() => setViewerZoom(imageViewerZoom - 0.2)}
+                title="Diminuir zoom"
+                disabled={imageViewerZoom <= 1}
+              >
+                <ZoomOutIcon />
+              </button>
+              <button className="chat-iconBtn" onClick={() => setViewerZoom(imageViewerZoom + 0.2)} title="Aumentar zoom">
+                <ZoomInIcon />
+              </button>
+              <button className="chat-iconBtn" onClick={resetImageViewerTransform} title="Resetar zoom">
+                <ResetZoomIcon />
+              </button>
+              <span className="chat-imageViewer__zoomLabel">{Math.round(imageViewerZoom * 100)}%</span>
+              <button className="chat-iconBtn" onClick={closeImageViewer} title="Fechar">
+                <CloseIcon />
+              </button>
+            </div>
+          </div>
+
+          <div className="chat-imageViewer__stageWrap" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="chat-imageViewer__nav chat-imageViewer__nav--left"
+              onClick={() => goToImage(-1)}
+              disabled={!canViewPrev}
+              title="Imagem anterior"
+            >
+              <ChevronLeftIcon />
+            </button>
+
+            <div
+              className={`chat-imageViewer__stage ${imageViewerZoom > 1 ? "is-zoomed" : ""} ${
+                imageViewerDragging ? "is-dragging" : ""
+              }`}
+              onWheel={(e) => {
+                if (!currentViewerUrl) return;
+                e.preventDefault();
+                const delta = e.deltaY < 0 ? 0.2 : -0.2;
+                setViewerZoom(imageViewerZoom + delta);
+              }}
+              onMouseDown={(e) => {
+                if (imageViewerZoom <= 1) return;
+                e.preventDefault();
+                imageViewerDragRef.current = {
+                  active: true,
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  originX: imageViewerOffset.x,
+                  originY: imageViewerOffset.y,
+                };
+                setImageViewerDragging(true);
+              }}
+              onMouseMove={(e) => {
+                const drag = imageViewerDragRef.current;
+                if (!drag?.active) return;
+                const nextX = drag.originX + (e.clientX - drag.startX);
+                const nextY = drag.originY + (e.clientY - drag.startY);
+                setImageViewerOffset({ x: nextX, y: nextY });
+              }}
+              onMouseUp={() => {
+                if (imageViewerDragRef.current) imageViewerDragRef.current.active = false;
+                setImageViewerDragging(false);
+              }}
+              onMouseLeave={() => {
+                if (imageViewerDragRef.current) imageViewerDragRef.current.active = false;
+                setImageViewerDragging(false);
+              }}
+              onDoubleClick={() => {
+                if (imageViewerZoom > 1) {
+                  resetImageViewerTransform();
+                } else {
+                  setViewerZoom(2);
+                }
+              }}
+            >
+              {currentViewerUrl ? (
+                <img
+                  key={currentViewerItem?.id ?? currentViewerUrl}
+                  src={currentViewerUrl}
+                  alt={currentViewerItem?.attachmentName ?? "imagem"}
+                  className="chat-imageViewer__image"
+                  draggable={false}
+                  style={{
+                    transform: `translate(${imageViewerOffset.x}px, ${imageViewerOffset.y}px) scale(${imageViewerZoom})`,
+                  }}
+                />
+              ) : (
+                <div className="chat-empty">Imagem indisponível.</div>
+              )}
+            </div>
+
+            <button
+              className="chat-imageViewer__nav chat-imageViewer__nav--right"
+              onClick={() => goToImage(1)}
+              disabled={!canViewNext}
+              title="Próxima imagem"
+            >
+              <ChevronRightIcon />
+            </button>
           </div>
         </div>
       ) : null}
@@ -1694,13 +2710,34 @@ export function ChatPage() {
                   </div>
 
                   <div className="chat-contactCard__name">{profileData.name}</div>
-                  <div className="chat-contactCard__sub">@{profileData.username}</div>
 
-                  <div className="chat-contactCard__info">
-                    <div>{profileData.email || "Sem e-mail"}</div>
-                    <div>{profileData.extension ? `Ramal: ${profileData.extension}` : "Sem ramal"}</div>
-                    <div>{profileData.company?.name ?? "Sem empresa"}</div>
-                    <div>{profileData.department?.name ?? "Sem setor"}</div>
+                  <div className="chat-contactCard__info chat-contactCard__info--contact">
+                    <div className="chat-contactInfoRow">
+                      <span className="chat-contactInfoLabel">Empresa:</span>
+                      <span className="chat-contactInfoValue">{profileData.company?.name ?? "Sem empresa"}</span>
+                    </div>
+                    <div className="chat-contactInfoRow">
+                      <span className="chat-contactInfoLabel">Setor:</span>
+                      <span className="chat-contactInfoValue">{profileData.department?.name ?? "Sem setor"}</span>
+                    </div>
+                    <div className="chat-contactInfoRow">
+                      <span className="chat-contactInfoLabel">Ramal:</span>
+                      <span className="chat-contactInfoValue">{profileData.extension || "Sem ramal"}</span>
+                    </div>
+                    <div className="chat-contactInfoRow chat-contactInfoRow--email">
+                      <span className="chat-contactInfoLabel">Email:</span>
+                      <span className="chat-contactInfoValue">{profileData.email || "Sem e-mail"}</span>
+                      <button
+                        className="chat-iconBtn chat-iconBtn--sm chat-contactInfoCopyBtn"
+                        onClick={() => {
+                          if (profileData.email) copyText(profileData.email);
+                        }}
+                        title={profileData.email ? "Copiar e-mail" : "Sem e-mail para copiar"}
+                        disabled={!profileData.email}
+                      >
+                        <CopyIcon />
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -1710,7 +2747,14 @@ export function ChatPage() {
                     <div className="chat-empty">Nenhuma favorita.</div>
                   ) : (
                     favoriteMessages.map((msg) => (
-                      <div key={msg.id} className="chat-favoriteCard">
+                      <button
+                        key={msg.id}
+                        className="chat-favoriteCard chat-favoriteCard--btn"
+                        onClick={() => {
+                          void jumpToMessageById(msg.id);
+                          setProfileOpen(false);
+                        }}
+                      >
                         <div className="chat-favoriteCard__top">
                           <span>{msg.sender?.name ?? "Mensagem"}</span>
                           <span>{fmtDateTime(msg.createdAt)}</span>
@@ -1723,7 +2767,7 @@ export function ChatPage() {
                               ? msg.attachmentName || "Arquivo"
                               : "Mensagem")}
                         </div>
-                      </div>
+                      </button>
                     ))
                   )}
                 </div>
@@ -1745,31 +2789,33 @@ export function ChatPage() {
                   </button>
                 </div>
 
-                <div className="chat-mediaGrid">
+                <div className={`chat-mediaGrid ${profileMediaTab === "image" ? "chat-mediaGrid--images" : ""}`}>
                   {profileMediaLoading ? (
                     <div className="chat-empty">Carregando…</div>
                   ) : profileMediaItems.length === 0 ? (
                     <div className="chat-empty">Nada encontrado.</div>
                   ) : profileMediaTab === "image" ? (
                     profileMediaItems.map((item) => (
-                      <a
+                      <button
                         key={item.id}
-                        href={toAbsoluteUrl(item.attachmentUrl) ?? "#"}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="chat-mediaThumb"
+                        className="chat-mediaThumb chat-mediaThumb--btn"
+                        onClick={() => {
+                          void jumpToMessageById(item.id);
+                          setProfileOpen(false);
+                        }}
                       >
                         <img src={toAbsoluteUrl(item.attachmentUrl) ?? ""} alt={item.attachmentName ?? "imagem"} />
-                      </a>
+                      </button>
                     ))
                   ) : (
                     profileMediaItems.map((item) => (
-                      <a
+                      <button
                         key={item.id}
-                        href={toAbsoluteUrl(item.attachmentUrl) ?? "#"}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="chat-fileCard"
+                        className="chat-fileCard chat-fileCard--btn"
+                        onClick={() => {
+                          void jumpToMessageById(item.id);
+                          setProfileOpen(false);
+                        }}
                       >
                         <div className="chat-fileCard__icon">
                           <FileIcon />
@@ -1778,7 +2824,7 @@ export function ChatPage() {
                           <div className="chat-fileCard__name">{item.attachmentName ?? "Arquivo"}</div>
                           <div className="chat-fileCard__meta">{fmtDateTime(item.createdAt)}</div>
                         </div>
-                      </a>
+                      </button>
                     ))
                   )}
                 </div>

@@ -49,11 +49,444 @@ body{
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }
 
+button{
+  transition:
+    transform 140ms ease,
+    box-shadow 180ms ease,
+    filter 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    opacity 180ms ease;
+}
+
+button:not(:disabled):hover{
+  transform: translateY(-1px);
+  filter: brightness(1.04);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+}
+
+button:not(:disabled):active{
+  transform: translateY(1px) scale(0.985);
+  filter: brightness(0.98);
+}
+
+button:focus-visible{
+  outline: 2px solid color-mix(in srgb, var(--bhash-primary) 60%, transparent);
+  outline-offset: 2px;
+}
+
+button:disabled{
+  cursor: not-allowed;
+}
+
+.admin-navActions{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.admin-navBtn{
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.28);
+  background: rgba(0,0,0,0.18);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 800;
+  position: relative;
+  overflow: hidden;
+}
+
+.admin-navBtn::after{
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 6px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color 160ms ease;
+}
+
+.admin-navBtn:hover{
+  background: rgba(255,255,255,0.16);
+  border-color: rgba(255,255,255,0.36);
+}
+
+.admin-navBtn.is-active{
+  background: rgba(255,255,255,0.22);
+  border-color: rgba(255,255,255,0.45);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.12),
+    0 10px 22px rgba(0,0,0,0.24);
+}
+
+.admin-navBtn.is-active::after{
+  background: rgba(255,255,255,0.9);
+}
+
+.admin-logoutBtn{
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(2,2,2,0.66);
+  background: rgba(255,0,0,0.83);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.admin-logoutBtn:hover{
+  background: rgba(255,0,0,0.9);
+}
+
+.admin-searchField{
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.admin-searchField__icon{
+  position: absolute;
+  left: 12px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.admin-searchField__icon svg{
+  width: 16px;
+  height: 16px;
+}
+
+.admin-searchField__input{
+  width: 100%;
+  padding: 12px 12px 12px 34px;
+  border-radius: 12px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--input-fg);
+  outline: none;
+}
+
+.admin-searchField__input::placeholder{
+  color: var(--muted);
+}
+
+.admin-actionBtn{
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, rgba(255,255,255,0.2));
+  background: color-mix(in srgb, var(--card-bg) 82%, transparent);
+  color: var(--fg);
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.admin-actionBtn svg{
+  width: 17px;
+  height: 17px;
+  display: block;
+}
+
+.admin-actionBtn:hover{
+  border-color: color-mix(in srgb, var(--bhash-primary) 48%, var(--border));
+  background: color-mix(in srgb, var(--bhash-primary) 14%, var(--card-bg));
+}
+
+.admin-actionBtn.is-success{
+  color: #9ee4b6;
+  border-color: color-mix(in srgb, #22c55e 40%, var(--border));
+}
+
+.admin-actionBtn.is-success:hover{
+  background: color-mix(in srgb, #22c55e 12%, var(--card-bg));
+}
+
+.admin-actionBtn.is-warning{
+  color: #ffd39a;
+  border-color: color-mix(in srgb, #f59e0b 44%, var(--border));
+}
+
+.admin-actionBtn.is-warning:hover{
+  background: color-mix(in srgb, #f59e0b 12%, var(--card-bg));
+}
+
+.admin-actionBtn.is-danger{
+  color: #ffb4b4;
+  border-color: color-mix(in srgb, #ef4444 44%, var(--border));
+}
+
+.admin-actionBtn.is-danger:hover{
+  background: color-mix(in srgb, #ef4444 12%, var(--card-bg));
+}
+
+.appcfg-grid{
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 12px;
+}
+
+.appcfg-currentLogoPanel{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.appcfg-currentLogoMedia{
+  height: 150px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(150deg, color-mix(in srgb, var(--bhash-primary) 22%, transparent), transparent 55%),
+    color-mix(in srgb, var(--card-bg) 80%, transparent);
+  display: grid;
+  place-items: center;
+  padding: 14px;
+}
+
+.appcfg-currentLogoImage{
+  max-height: 92px;
+  max-width: 85%;
+  object-fit: contain;
+}
+
+.appcfg-currentLogoInfo{
+  display: grid;
+  gap: 4px;
+}
+
+.appcfg-currentLogoTitle{
+  font-weight: 900;
+}
+
+.appcfg-currentLogoSub{
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.appcfg-currentLogoUrl{
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.appcfg-actionsRow{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.appcfg-primaryBtn,
+.appcfg-ghostBtn{
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 10px 14px;
+  font-weight: 900;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.appcfg-primaryBtn{
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+}
+
+.appcfg-ghostBtn{
+  background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+  color: var(--fg);
+}
+
+.appcfg-uploadHint{
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.appcfg-sectionTitle{
+  margin-top: 14px;
+  margin-bottom: 8px;
+  font-weight: 900;
+}
+
+.appcfg-empty{
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+}
+
+.appcfg-logoGrid{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.appcfg-logoCard{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--card-bg) 80%, transparent);
+  display: grid;
+  gap: 8px;
+}
+
+.appcfg-logoCard.is-current{
+  border-color: color-mix(in srgb, var(--bhash-primary) 55%, var(--border));
+  background: color-mix(in srgb, var(--bhash-primary) 10%, var(--card-bg));
+}
+
+.appcfg-logoThumb{
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  height: 76px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--bg) 95%, transparent);
+  display: grid;
+  place-items: center;
+}
+
+.appcfg-logoThumb img{
+  max-width: 100%;
+  max-height: 60px;
+  object-fit: contain;
+}
+
+.appcfg-logoDetails{
+  min-width: 0;
+}
+
+.appcfg-logoName{
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.appcfg-logoMeta{
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.appcfg-logoActions{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.appcfg-useBtn{
+  flex: 1;
+  min-width: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 9px 10px;
+  font-weight: 800;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.appcfg-useBtn.is-current{
+  border-color: color-mix(in srgb, var(--bhash-primary) 55%, var(--border));
+  background: color-mix(in srgb, var(--bhash-primary) 12%, var(--card-bg));
+}
+
+.appcfg-colorPreview{
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+}
+
+.appcfg-colorSwatch{
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.22);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.22);
+}
+
+.appcfg-colorText{
+  font-weight: 900;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.appcfg-colorInputs{
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.appcfg-colorPicker{
+  width: 54px;
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.appcfg-presetRow{
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.appcfg-presetBtn{
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-bg) 86%, transparent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.appcfg-presetBtn.is-active{
+  border-color: color-mix(in srgb, var(--bhash-primary) 58%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bhash-primary) 45%, transparent);
+}
+
+.appcfg-presetDot{
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.3);
+}
+
+@media (max-width: 960px){
+  .appcfg-logoGrid{
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ===== Theme Toggle (sempre visível, independente da cor da navbar) ===== */
 .toggle{
   position: relative;
-  width: 68px;
-  height: 36px;
+  width: 66px;
+  height: 34px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.22);
   background: rgba(0,0,0,0.35);
@@ -66,6 +499,8 @@ body{
   align-items: center;
   justify-content: center;
   color: rgba(255,255,255,0.92);
+  flex: 0 0 auto;
+  transform: none !important;
 }
 
 .toggle:focus-visible{
@@ -90,10 +525,10 @@ body{
 .toggle__knob{
   position: absolute;
   top: 50%;
-  left: 6px;
+  left: 5px;
   transform: translateY(-50%);
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border-radius: 999px;
   background: rgba(255,255,255,0.92);
   box-shadow: 0 8px 18px rgba(0,0,0,0.35);
@@ -101,7 +536,7 @@ body{
 }
 
 .toggle--dark .toggle__knob{
-  left: calc(100% - 6px - 26px);
+  left: calc(100% - 5px - 24px);
 }
 
 .toggle--dark .toggle__icon--left{ opacity: 0.65; }

@@ -32,6 +32,19 @@ type ActiveFilter = "all" | "active" | "inactive";
 
 type CompanyItem = { id: string; name: string };
 type DepartmentItem = { id: string; name: string };
+const USERS_FETCH_BATCH = 200;
+const PT_BR_COLLATOR = new Intl.Collator("pt-BR", {
+  sensitivity: "base",
+  numeric: true,
+});
+
+function compareAlpha(a?: string | null, b?: string | null) {
+  return PT_BR_COLLATOR.compare((a ?? "").trim(), (b ?? "").trim());
+}
+
+function sortByName<T extends { name?: string | null }>(items: T[]) {
+  return [...items].sort((a, b) => compareAlpha(a.name, b.name));
+}
 
 export function AdminUsersPage() {
   const { api } = useAdminAuth();
@@ -45,9 +58,6 @@ export function AdminUsersPage() {
 
   const [companies, setCompanies] = useState<CompanyItem[]>([]);
   const [departments, setDepartments] = useState<DepartmentItem[]>([]);
-
-  const [page, setPage] = useState(1);
-  const pageSize = 10;
 
   const [data, setData] = useState<Paged<UserRow> | null>(null);
   const [loading, setLoading] = useState(false);
@@ -63,8 +73,8 @@ export function AdminUsersPage() {
         api.get<{ ok: boolean; items: DepartmentItem[] }>("/admin/org/departments"),
       ]);
 
-      setCompanies(cRes.data.items ?? []);
-      setDepartments(dRes.data.items ?? []);
+      setCompanies(sortByName(cRes.data.items ?? []));
+      setDepartments(sortByName(dRes.data.items ?? []));
     } catch (e) {
       setCompanies([]);
       setDepartments([]);
@@ -76,20 +86,52 @@ export function AdminUsersPage() {
     setLoading(true);
     setMsg(null);
     try {
-      const params: any = { page, pageSize };
+      const baseParams: any = {};
 
       const qs = q.trim();
-      if (qs) params.q = qs;
+      if (qs) baseParams.q = qs;
 
-      if (activeFilter === "active") params.active = "true";
-      if (activeFilter === "inactive") params.active = "false";
+      if (activeFilter === "active") baseParams.active = "true";
+      if (activeFilter === "inactive") baseParams.active = "false";
 
       // ✅ filtros empresa/setor combinados
-      if (companyId) params.companyId = companyId;
-      if (departmentId) params.departmentId = departmentId;
+      if (companyId) baseParams.companyId = companyId;
+      if (departmentId) baseParams.departmentId = departmentId;
 
-      const res = await api.get<Paged<UserRow>>("/admin/users", { params });
-      setData(res.data);
+      let currentPage = 1;
+      let total = 0;
+      const allItems: UserRow[] = [];
+
+      while (currentPage < 500) {
+        const res = await api.get<Paged<UserRow>>("/admin/users", {
+          params: {
+            ...baseParams,
+            page: currentPage,
+            pageSize: USERS_FETCH_BATCH,
+          },
+        });
+
+        const batch = res.data.items ?? [];
+        total = res.data.total ?? batch.length;
+        allItems.push(...batch);
+
+        if (!batch.length || allItems.length >= total || batch.length < USERS_FETCH_BATCH) break;
+        currentPage += 1;
+      }
+
+      const sortedUsers = [...allItems].sort((a, b) => {
+        const byName = compareAlpha(a.name || a.username, b.name || b.username);
+        if (byName !== 0) return byName;
+        return compareAlpha(a.username, b.username);
+      });
+
+      setData({
+        ok: true,
+        page: 1,
+        pageSize: sortedUsers.length,
+        total,
+        items: sortedUsers,
+      });
     } catch (e: any) {
       setMsg(e?.response?.data?.message ?? "Falha ao carregar usuários");
     } finally {
@@ -100,7 +142,7 @@ export function AdminUsersPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, activeFilter, companyId, departmentId]);
+  }, [activeFilter, companyId, departmentId]);
 
   useEffect(() => {
     // carrega combos (empresa/setor) ao entrar e quando muda empresa
@@ -109,9 +151,8 @@ export function AdminUsersPage() {
   }, [companyId]);
 
   useEffect(() => {
-    // quando digita busca, volta pra pagina 1 e recarrega com debounce leve
+    // quando digita busca, recarrega com debounce leve
     const t = setTimeout(() => {
-      setPage(1);
       load();
     }, 250);
     return () => clearTimeout(t);
@@ -119,7 +160,6 @@ export function AdminUsersPage() {
   }, [q]);
 
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   const items = data?.items ?? [];
 
@@ -135,28 +175,23 @@ export function AdminUsersPage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
         <Card title="Filtros" colSpan={12} right={headerRight}>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder='🔍Buscar'
-              style={{
-                flex: 1,
-                minWidth: 260,
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--input-border)",
-                background: "var(--input-bg)",
-                color: "var(--input-fg)",
-                outline: "none",
-              }}
-            />
+            <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
+              <span className="admin-searchField__icon" aria-hidden="true">
+                <SearchIcon />
+              </span>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Buscar"
+                className="admin-searchField__input"
+              />
+            </div>
 
             <select
               value={companyId}
               onChange={(e) => {
                 setCompanyId(e.target.value);
                 setDepartmentId(""); // reseta setor ao trocar empresa
-                setPage(1);
               }}
               style={{
                 padding: "12px 12px",
@@ -180,7 +215,6 @@ export function AdminUsersPage() {
               value={departmentId}
               onChange={(e) => {
                 setDepartmentId(e.target.value);
-                setPage(1);
               }}
               style={{
                 padding: "12px 12px",
@@ -204,7 +238,6 @@ export function AdminUsersPage() {
               value={activeFilter}
               onChange={(e) => {
                 setActiveFilter(e.target.value as ActiveFilter);
-                setPage(1);
               }}
               style={{
                 padding: "12px 12px",
@@ -241,61 +274,73 @@ export function AdminUsersPage() {
         </Card>
 
         <Card title="Lista" colSpan={12}>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
+          <div style={{ borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+              <colgroup>
+                <col style={{ width: 120 }} />
+                <col style={{ width: 190 }} />
+                <col />
+                <col style={{ width: 170 }} />
+                <col style={{ width: 170 }} />
+                <col style={{ width: 170 }} />
+              </colgroup>
               <thead>
-                <tr style={{ textAlign: "left" }}>
-                  <Th>Status</Th>
+                <tr>
+                  <Th style={{ textAlign: "center" }}>Status</Th>
                   <Th>Username</Th>
                   <Th>Nome</Th>
-                  <Th>Setor</Th>
-                  <Th>Empresa</Th>
-                  <Th>Email</Th>
-                  <Th>Ramal</Th>
-                  <Th>Criado</Th>
-                  <Th>Último login</Th>
-                  <Th style={{ textAlign: "right" }}>Ações</Th>
+                  <Th style={{ textAlign: "center" }}>Criado</Th>
+                  <Th style={{ textAlign: "center" }}>Último login</Th>
+                  <Th style={{ textAlign: "center" }}>Ações</Th>
                 </tr>
               </thead>
 
               <tbody>
                 {loading ? (
                   <tr>
-                    <Td colSpan={10} style={{ color: "var(--muted)", padding: 14 }}>
+                    <Td colSpan={6} style={{ color: "var(--muted)", padding: 14 }}>
                       Carregando…
                     </Td>
                   </tr>
                 ) : items.length === 0 ? (
                   <tr>
-                    <Td colSpan={10} style={{ color: "var(--muted)", padding: 14 }}>
+                    <Td colSpan={6} style={{ color: "var(--muted)", padding: 14 }}>
                       Nenhum usuário encontrado.
                     </Td>
                   </tr>
                 ) : (
                   items.map((u) => (
                     <tr key={u.id} style={{ borderTop: "1px solid var(--border)" }}>
-                      <Td>
+                      <Td style={{ textAlign: "center" }}>
                         <StatusPill active={u.isActive} />
                       </Td>
-                      <Td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+                      <Td
+                        style={{
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
                         {u.username}
                       </Td>
                       <Td style={{ fontWeight: 800 }}>{u.name}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{getLabel((u as any).department ?? (u as any).sector)}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{getLabel(u.company)}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{u.email ?? "—"}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{u.extension ?? "—"}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{fmt(u.createdAt)}</Td>
-                      <Td style={{ color: "var(--muted)" }}>{u.lastLoginAt ? fmt(u.lastLoginAt) : "—"}</Td>
+                      <Td style={{ color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap" }}>
+                        {fmt(u.createdAt)}
+                      </Td>
+                      <Td style={{ color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap" }}>
+                        {u.lastLoginAt ? fmt(u.lastLoginAt) : "—"}
+                      </Td>
 
-                      <Td style={{ textAlign: "right" }}>
-                        <div style={{ display: "inline-flex", gap: 10 }}>
-                          <IconButton title="Editar" onClick={() => setEditUser(u)}>
+                      <Td style={{ textAlign: "center" }}>
+                        <div style={{ display: "inline-flex", gap: 10, justifyContent: "center" }}>
+                          <IconButton title="Editar" onClick={() => setEditUser(u)} tone="neutral">
                             <IconPencil />
                           </IconButton>
 
                           <IconButton
                             title={u.isActive ? "Desativar" : "Ativar"}
+                            tone={u.isActive ? "warning" : "success"}
                             onClick={async () => {
                               await api.patch(`/admin/users/${u.id}`, { isActive: !u.isActive });
                               await load();
@@ -306,7 +351,7 @@ export function AdminUsersPage() {
 
                           <IconButton
                             title="Excluir"
-                            danger
+                            tone="danger"
                             onClick={async () => {
                               const ok = confirm(`Excluir o usuário "${u.username}"? Essa ação não pode ser desfeita.`);
                               if (!ok) return;
@@ -324,25 +369,6 @@ export function AdminUsersPage() {
               </tbody>
             </table>
           </div>
-
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
-            <div style={{ color: "var(--muted)" }}>
-              Página {page} / {totalPages}
-            </div>
-
-            <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} style={pagerBtn(page <= 1)}>
-                Anterior
-              </button>
-              <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-                style={pagerBtn(page >= totalPages)}
-              >
-                Próxima
-              </button>
-            </div>
-          </div>
         </Card>
       </div>
 
@@ -357,7 +383,6 @@ export function AdminUsersPage() {
           onConfirm={async (payload) => {
             await api.post("/admin/users", payload);
             setCreateOpen(false);
-            setPage(1);
             await load();
           }}
         />
@@ -435,7 +460,7 @@ function Th(props: any) {
     <th
       {...props}
       style={{
-        padding: "10px 10px",
+        padding: "10px 8px",
         color: "#fff",
         fontWeight: 900,
         borderBottom: "1px solid var(--border)",
@@ -450,8 +475,8 @@ function Td(props: any) {
     <td
       {...props}
       style={{
-        padding: "14px 10px",
-        verticalAlign: "top",
+        padding: "14px 8px",
+        verticalAlign: "middle",
         ...props.style,
       }}
     />
@@ -488,26 +513,6 @@ function StatusPill({ active }: { active: boolean }) {
   );
 }
 
-function pagerBtn(disabled: boolean): React.CSSProperties {
-  return {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid var(--border)",
-    background: "transparent",
-    color: "var(--fg)",
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.5 : 1,
-    fontWeight: 800,
-  };
-}
-
-function getLabel(v: any): string {
-  if (!v) return "—";
-  if (typeof v === "string") return v || "—";
-  if (typeof v === "object" && "name" in v) return String(v.name || "—");
-  return "—";
-}
-
 function fmt(d: string) {
   try {
     return new Date(d).toLocaleString();
@@ -519,29 +524,21 @@ function fmt(d: string) {
 function IconButton({
   title,
   onClick,
-  danger,
+  tone = "neutral",
   children,
 }: {
   title: string;
   onClick: () => void;
-  danger?: boolean;
+  tone?: "neutral" | "warning" | "success" | "danger";
   children: React.ReactNode;
 }) {
   return (
     <button
       title={title}
       onClick={onClick}
-      style={{
-        width: 42,
-        height: 42,
-        display: "grid",
-        placeItems: "center",
-        borderRadius: 12,
-        border: "1px solid var(--border)",
-        background: "transparent",
-        color: danger ? "#ffb4b4" : "var(--fg)",
-        cursor: "pointer",
-      }}
+      className={`admin-actionBtn ${tone === "danger" ? "is-danger" : ""} ${
+        tone === "warning" ? "is-warning" : ""
+      } ${tone === "success" ? "is-success" : ""}`}
     >
       {children}
     </button>
@@ -674,7 +671,8 @@ function UserModal({
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const deptOptions = departments; // se quiser, depois filtramos por companyId no backend e aqui também
+  const companyOptions = useMemo(() => sortByName(companies), [companies]);
+  const deptOptions = useMemo(() => sortByName(departments), [departments]); // se quiser, depois filtramos por companyId no backend e aqui também
 
   async function submit() {
     setErr(null);
@@ -758,7 +756,7 @@ function UserModal({
             style={inputStyle()}
           >
             <option value="">— Selecione —</option>
-            {companies.map((c) => (
+            {companyOptions.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
@@ -982,15 +980,33 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: b
 }
 
 /** ===== ÍCONES (SVG) — sem emoji ===== */
+function SearchIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+      <path d="m20 20-3.6-3.6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function IconPencil() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 20h9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       <path
-        d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4L16.5 3.5Z"
+        d="M3 20.5 4.55 15l9.9-9.9a2.25 2.25 0 0 1 3.18 0l1.27 1.27a2.25 2.25 0 0 1 0 3.18L9 19.45 3 20.5Z"
+        fill="currentColor"
+      />
+      <path
+        d="m14.98 7.26 3.76 3.76"
         stroke="currentColor"
-        strokeWidth="2"
-        strokeLinejoin="round"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        opacity="0.55"
+      />
+      <path
+        d="m6.9 17.1 2.98-.6-2.38-2.38-.6 2.98Z"
+        fill="currentColor"
+        opacity="0.55"
       />
     </svg>
   );
@@ -998,22 +1014,21 @@ function IconPencil() {
 function IconTrash() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M8 6V4h8v2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
-      <path d="M7 6l1 16h8l1-16" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
-      <path d="M10 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M4 7h16" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M9 3h6a1 1 0 0 1 1 1v3H8V4a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
+      <path d="m6 7 1 12a2 2 0 0 0 2 1.8h6a2 2 0 0 0 2-1.8L18 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }
 function IconPower() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 2v10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M12 3v7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
       <path
-        d="M6.1 4.7a10 10 0 1 0 11.8 0"
+        d="M7.4 6.3a8.5 8.5 0 1 0 9.2 0"
         stroke="currentColor"
-        strokeWidth="2"
+        strokeWidth="1.9"
         strokeLinecap="round"
         strokeLinejoin="round"
       />

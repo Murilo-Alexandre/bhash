@@ -45,7 +45,7 @@ export class AppConfigService {
     return cfg;
   }
 
-  async setLogoUrl(url: string) {
+  async setLogoUrl(url: string | null) {
     return this.updateConfig({ logoUrl: url });
   }
 }
