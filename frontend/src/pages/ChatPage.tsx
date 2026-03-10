@@ -624,6 +624,18 @@ function ArrowDownIcon() {
   );
 }
 
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+      <path
+        d="M4 11.6 20.2 4.4c.9-.4 1.8.5 1.4 1.4L14.4 22c-.4.9-1.7.8-1.9-.2l-1.5-6.2-6.2-1.5c-1-.2-1.1-1.5-.2-1.9Z"
+        fill="currentColor"
+      />
+      <path d="m11 15 10-10" stroke="rgba(255,255,255,0.9)" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function ChevronLeftIcon() {
   return (
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
@@ -764,6 +776,7 @@ export function ChatPage() {
   const [imageViewerZoom, setImageViewerZoom] = useState(1);
   const [imageViewerOffset, setImageViewerOffset] = useState({ x: 0, y: 0 });
   const [imageViewerDragging, setImageViewerDragging] = useState(false);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => window.innerWidth <= 900);
 
   const socketRef = useRef<Socket | null>(null);
   const conversationsRef = useRef<ConversationListItem[]>([]);
@@ -797,6 +810,12 @@ export function ChatPage() {
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  useEffect(() => {
+    const onResize = () => setIsMobileLayout(window.innerWidth <= 900);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -1492,6 +1511,8 @@ export function ChatPage() {
   const currentViewerUrl = toAbsoluteUrl(currentViewerItem?.attachmentUrl);
   const canViewPrev = imageViewerIndex > 0;
   const canViewNext = imageViewerIndex < imageViewerItems.length - 1;
+  const showMobileSidebar = !isMobileLayout || !activeConv;
+  const showMobileMain = !isMobileLayout || !!activeConv;
 
   useLayoutEffect(() => {
     const container = convListRef.current;
@@ -1713,7 +1734,8 @@ export function ChatPage() {
         }
       />
 
-      <div className="chat-layout">
+      <div className={`chat-layout ${isMobileLayout ? "is-mobile" : ""}`}>
+        {showMobileSidebar ? (
         <aside className="chat-sidebar">
           <div className="chat-sidebar__header">
             <div className="chat-sidebar__title">Conversas</div>
@@ -1812,27 +1834,48 @@ export function ChatPage() {
             )}
           </div>
         </aside>
+        ) : null}
 
+        {showMobileMain ? (
         <main className="chat-main">
           <div className="chat-mainHeader">
             {activeConv ? (
-              <button className="chat-contactBtn" onClick={() => void loadProfileDrawer()}>
-                <div className="chat-avatar chat-avatar--lg">
-                  {(() => {
-                    const other = activeConv.otherUser;
-                    const avatar = toAbsoluteUrl(other.avatarUrl);
-                    return avatar ? <img src={avatar} alt={other.name} /> : <span>{other.name.slice(0, 1).toUpperCase()}</span>;
-                  })()}
-                </div>
+              <div className="chat-mainHeader__left">
+                {isMobileLayout ? (
+                  <button
+                    className="chat-iconBtn chat-mainHeader__backBtn"
+                    onClick={() => {
+                      setActiveConv(null);
+                      setSearchOpen(false);
+                      setProfileOpen(false);
+                      setMessages([]);
+                      setNewMsgsCount(0);
+                      setShowJumpNew(false);
+                    }}
+                    title="Voltar para conversas"
+                  >
+                    <ChevronLeftIcon />
+                  </button>
+                ) : null}
 
-                <div className="chat-mainHeader__text">
-                  <div className="chat-mainHeader__name">{activeConv.otherUser.name}</div>
-                  <div className="chat-mainHeader__sub">
-                    {activeConv.otherUser.department?.name ?? "Sem setor"}
-                    {activeConv.otherUser.company?.name ? ` • ${activeConv.otherUser.company.name}` : ""}
+                <button className="chat-contactBtn" onClick={() => void loadProfileDrawer()}>
+                  <div className="chat-avatar chat-avatar--lg">
+                    {(() => {
+                      const other = activeConv.otherUser;
+                      const avatar = toAbsoluteUrl(other.avatarUrl);
+                      return avatar ? <img src={avatar} alt={other.name} /> : <span>{other.name.slice(0, 1).toUpperCase()}</span>;
+                    })()}
                   </div>
-                </div>
-              </button>
+
+                  <div className="chat-mainHeader__text">
+                    <div className="chat-mainHeader__name">{activeConv.otherUser.name}</div>
+                    <div className="chat-mainHeader__sub">
+                      {activeConv.otherUser.department?.name ?? "Sem setor"}
+                      {activeConv.otherUser.company?.name ? ` • ${activeConv.otherUser.company.name}` : ""}
+                    </div>
+                  </div>
+                </button>
+              </div>
             ) : (
               <div className="chat-mainHeader__placeholder">Selecione uma conversa</div>
             )}
@@ -2369,13 +2412,16 @@ export function ChatPage() {
                 className="chat-sendBtn"
                 onClick={() => void sendMessage()}
                 disabled={!activeConv || sending || (!text.trim() && !attachmentFile)}
+                aria-label={sending ? "Enviando mensagem" : "Enviar mensagem"}
+                title={sending ? "Enviando..." : "Enviar"}
               >
-                {sending ? "Enviando..." : "Enviar"}
+                <SendIcon />
               </button>
             </div>
           </div>
           </div>
         </main>
+        ) : null}
       </div>
 
       {myInfoOpen ? (

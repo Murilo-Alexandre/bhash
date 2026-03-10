@@ -22,10 +22,10 @@ export function AdminDashboard() {
   }, []);
 
   return (
-    <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
+    <div className="admin-page">
       <h1 style={{ margin: 0, marginBottom: 12 }}>Dashboard</h1>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+      <div className="admin-grid12">
         <Card title="Backend /admin/ping" colSpan={6}>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <StatusDot ok={!!ping?.ok} />
@@ -71,6 +71,7 @@ export function AdminDashboard() {
 function Card({ title, colSpan, children }: { title: string; colSpan: number; children: any }) {
   return (
     <div
+      className="admin-card"
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,

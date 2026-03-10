@@ -1,0 +1,32 @@
+{
+  "name": "bhash-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev:all": "concurrently -k -n backend,frontend,admin -c green,cyan,magenta \"npm --prefix backend run start:dev\" \"npm --prefix frontend run dev\" \"npm --prefix frontend-admin run dev\"",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:status": "docker compose ps",
+    "infra:logs": "docker compose logs -f --tail=200",
+    "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install && npm --prefix frontend-admin install",
+    "build:all": "npm --prefix backend run build && npm --prefix frontend run build && npm --prefix frontend-admin run build",
+    "prisma:generate": "npm --prefix backend run prisma:generate",
+    "prisma:migrate:deploy": "npm --prefix backend run prisma:migrate:deploy",
+    "setup:server": "npm run install:all && npm run prisma:generate && npm run prisma:migrate:deploy && npm run build:all",
+    "services:start": "pm2 start ecosystem.config.cjs --update-env",
+    "services:reload": "pm2 reload ecosystem.config.cjs --update-env",
+    "services:restart": "pm2 restart ecosystem.config.cjs --update-env",
+    "services:stop": "pm2 stop ecosystem.config.cjs",
+    "services:delete": "pm2 delete ecosystem.config.cjs",
+    "services:status": "pm2 status",
+    "services:logs": "pm2 logs --lines 200",
+    "services:save": "pm2 save",
+    "services:resurrect": "pm2 resurrect",
+    "server:deploy": "npm run setup:server && npm run services:start && npm run services:save",
+    "server:update": "npm run build:all && npm run services:reload && npm run services:save"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "pm2": "^6.0.13"
+  }
+}

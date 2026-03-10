@@ -186,7 +186,7 @@ export function AdminAppConfigPage() {
   }
 
   return (
-    <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
+    <div className="admin-page">
       <h1 style={{ margin: 0, marginBottom: 12 }}>Config do App</h1>
 
       <div className="appcfg-grid">
@@ -358,6 +358,7 @@ function Card({
 }) {
   return (
     <div
+      className="admin-card"
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,

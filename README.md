@@ -1,151 +1,232 @@
-# 🏢 BHASH — Mensageiro Corporativo On-Premise
+# BHASH - Guia Completo de Implantacao
 
-O **BHASH** é um mensageiro corporativo interno, desenvolvido para rodar totalmente dentro da infraestrutura da empresa (on-premise), garantindo controle total dos dados, governança administrativa e personalização visual.
+Mensageiro corporativo on-premise com:
 
-A proposta é ser o **“WhatsApp interno da empresa”**, sem dependência de serviços externos e com foco em segurança, auditoria e replicabilidade.
+- `backend` (NestJS + Prisma + PostgreSQL + Socket.IO)
+- `frontend` (chat do usuario)
+- `frontend-admin` (painel administrativo)
 
----
+Este README e o guia principal de deploy e operacao.
 
-## 🏗 Arquitetura
+## Estrutura do Projeto
 
-O sistema é dividido em três aplicações:
+```
+bhash/
+  backend/
+  frontend/
+  frontend-admin/
+  scripts/
+    linux/
+    windows/
+  docker-compose.yml
+  ecosystem.config.cjs
+```
 
-### 🔹 Backend
-- NestJS
-- Prisma ORM
-- PostgreSQL
-- Redis (preparado para tempo real)
+## Portas Padrao
 
-Responsável por:
-- Autenticação de usuários (chat)
-- Autenticação de administradores
-- Regras de conversas e mensagens
-- Persistência de dados
-- Configuração visual (logo/cor)
-- Estrutura preparada para auditoria
+- Backend API/WebSocket: `3000`
+- Frontend Chat (preview/producao): `5173`
+- Frontend Admin (preview/producao): `5174`
+- PostgreSQL: `5432`
+- Redis: `6379`
 
-### 🔹 Frontend Chat
-- React + Vite  
-Usuários comuns:
-- Login
-- Lista de usuários disponíveis
-- Conversas privadas 1:1
-- Histórico persistente
-- Envio de mensagens
-- Tema dinâmico (cor e logo)
+## Pre-Requisitos
 
-### 🔹 Frontend Admin
-- React + Vite  
-Administradores:
-- Login separado
-- SuperAdmin obrigatório no primeiro acesso
-- Configuração de cor e logo
-- Gestão de usuários
+### Linux (recomendado para servidor)
 
----
+- Node.js 20+ (preferencialmente LTS)
+- npm 10+
+- Docker Engine + Docker Compose Plugin
+- Git
 
-## ✅ O Que Já Está Pronto
+### Windows (suporte)
 
-### 💬 Chat
-- Conversas 1:1 funcionando
-- Histórico persistente
-- Lista de usuários
-- Controle de usuário ativo/inativo
-- Estrutura multiempresa preparada
+- Node.js 20+
+- npm 10+
+- Docker Desktop
+- PowerShell
 
-(Ajustes pendentes apenas de UX e refinamento visual)
+## Variaveis de Ambiente
 
-### 🎨 Branding
-- Alteração de cor primária
-- Upload de logo personalizada
-- Reset para padrão
-- Persistência via AppConfig
+Arquivo principal: `backend/.env`.
 
-### 👤 Gestão de Usuários
-- Criar, editar e excluir usuários
-- Resetar senha
-- Forçar troca de senha no primeiro login
-- Ativar/desativar usuários
-- Filtros por empresa, setor e status
-- Paginação
+Minimo necessario:
 
-(Pequenos ajustes visuais ainda pendentes no painel)
+```env
+DATABASE_URL=postgresql://bhash:bhashpass@localhost:5432/bhash
+JWT_SECRET=troque-por-uma-chave-forte
+CORS_ORIGINS=http://localhost:5173,http://localhost:5174,LAN
+```
 
----
+## Desenvolvimento Local
 
-## 🔎 Próxima Implementação
+Subir infra:
 
-### 📜 Visualização Administrativa de Conversas
+```bash
+npm run infra:up
+```
 
-Administradores poderão:
-- Visualizar histórico completo de qualquer usuário
-- Filtrar por:
-  - Empresa
-  - Setor
-  - Usuário
-  - Período
-  - Palavra-chave
-- Paginação eficiente
+Rodar tudo em modo dev:
 
-### 🔐 Regra Importante
-Usuários nunca apagam mensagens definitivamente.  
-Eles apenas ocultam para si.  
-O administrador sempre terá acesso ao histórico completo.
+```bash
+npm run dev:all
+```
 
----
+## Producao Linux (servidor terminal)
 
-## 📊 Auditoria (Planejado)
+### 1) Preparar servidor
 
-O sistema terá registro completo de ações:
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin git curl
+sudo systemctl enable --now docker
+```
 
-- Quem criou, editou ou excluiu usuários
-- Quem resetou senha
-- Quem enviou mensagem
-- Quem removeu mensagem
-- Alterações administrativas
-- Data, hora e responsável por cada ação
+Instalar Node.js 20+ (via NodeSource, nvm ou pacote da sua distribuicao).
 
+### 2) Clonar projeto
 
----
+```bash
+sudo mkdir -p /opt/bhash
+sudo chown -R $USER:$USER /opt/bhash
+git clone <SEU_REPO> /opt/bhash
+cd /opt/bhash
+```
 
-## 🧠 Filosofia do Projeto
+### 3) Configurar `.env`
 
-O BHASH é construído com foco em:
+Edite `backend/.env` com valores do servidor.
 
-- On-premise (controle total do dado)
-- Multiempresa
-- Governança
-- Auditoria estruturada
-- Deploy replicável via Docker
-- Separação clara entre usuário e administrador
-- SuperAdmin obrigatório no primeiro acesso
-- Evolução modular
+### 4) Deploy inicial
 
----
+Opcao automatica:
 
-## 📦 Evolução do Projeto
+```bash
+chmod +x scripts/linux/*.sh
+./scripts/linux/first-deploy.sh /opt/bhash
+```
 
-O código será analisado em duas etapas:
+Opcao manual equivalente:
 
-1. Frontend (Chat + Admin)
-2. Backend + Prisma + Docker
+```bash
+npm run infra:up
+npm run setup:server
+npm run services:start
+npm run services:save
+```
 
-Isso permitirá finalizar:
-- Visualização administrativa de conversas
-- Sistema completo de auditoria
-- Ajustes finais de governança
+### 5) Habilitar auto start no boot (Linux)
 
----
+Instala servico `systemd` que executa `pm2 resurrect`:
 
-## 🚀 Diferenciais
+```bash
+sudo ./scripts/linux/install-systemd-service.sh /opt/bhash $USER
+```
 
-- Controle total dos dados
-- Governança corporativa real
-- Personalização por empresa
-- Instalação simples
-- Arquitetura escalável
+Validar:
 
----
+```bash
+systemctl status bhash-pm2-resurrect.service
+```
 
-**BHASH é mais que um chat.  
-É uma plataforma interna de comunicação com controle, segurança e rastreabilidade.**
+### 6) Verificar status
+
+```bash
+./scripts/linux/status.sh /opt/bhash
+```
+
+Ou manual:
+
+```bash
+docker ps
+npm run services:status
+```
+
+### 7) Atualizar versao em producao
+
+Opcao automatica:
+
+```bash
+./scripts/linux/update.sh /opt/bhash
+```
+
+Opcao manual:
+
+```bash
+git pull --ff-only
+npm run setup:server
+npm run services:reload
+npm run services:save
+```
+
+## Producao Windows (resumo)
+
+```powershell
+cd C:\dev\bhash
+npm run infra:up
+npm run setup:server
+npm run services:start
+npm run services:save
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-startup-task.ps1
+```
+
+Para startup da maquina (SYSTEM), usar PowerShell como administrador:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-startup-task.ps1 -ForceSystemStartup
+```
+
+## Como o Auto Start Funciona
+
+1. PM2 guarda os processos em `dump.pm2` via `npm run services:save`.
+2. No boot/logon, um gatilho do sistema executa `pm2 resurrect`.
+3. PM2 restaura backend/chat/admin sem terminal aberto.
+4. Docker religa Postgres/Redis por `restart: unless-stopped`.
+
+## Comandos Operacionais Uteis
+
+```bash
+npm run infra:status
+npm run infra:logs
+npm run services:status
+npm run services:logs
+npm run services:restart
+npm run services:stop
+npm run services:delete
+```
+
+## Troubleshooting
+
+### `EPERM ... esbuild.exe` (Windows)
+
+```powershell
+taskkill /F /IM node.exe
+npm run services:delete
+```
+
+Depois execute novamente `npm run setup:server`.
+
+### PM2 vazio apos reboot
+
+- Verifique se `services:save` foi executado.
+- Verifique se a tarefa/systemd de startup esta ativa.
+
+### Backend sobe e cai
+
+Checar logs:
+
+```bash
+npm run services:logs
+```
+
+Normalmente e `DATABASE_URL`, `JWT_SECRET` ou migracao pendente.
+
+## READMEs por Modulo
+
+- [Backend](backend/README.md)
+- [Frontend Chat](frontend/README.md)
+- [Frontend Admin](frontend-admin/README.md)
+
+## Electron (cliente instalavel)
+
+Roadmap: [docs/electron-rollout.md](docs/electron-rollout.md)

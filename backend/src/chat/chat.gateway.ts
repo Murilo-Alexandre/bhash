@@ -5,31 +5,28 @@ import {
   WebSocketGateway,
   WebSocketServer,
   OnGatewayInit,
+  OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { MessagesService } from '../messages/messages.service';
 import { ChatEventsService } from './chat-events.service';
-
-function parseOrigins(v?: string) {
-  return (v ?? 'http://localhost:5173')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
+import { parseCorsOrigins } from '../common/cors-origins';
 
 @WebSocketGateway({
   cors: {
-    origin: parseOrigins(process.env.CORS_ORIGINS),
+    origin: parseCorsOrigins(process.env.CORS_ORIGINS),
     credentials: true,
   },
 })
-export class ChatGateway implements OnGatewayInit {
+export class ChatGateway implements OnGatewayInit, OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
   private readonly jwtSecret: string;
+  private readonly onlineUserConnectionCount = new Map<string, number>();
+  private readonly userLastLoginAt = new Map<string, string>();
 
   constructor(
     private readonly jwt: JwtService,
@@ -44,6 +41,50 @@ export class ChatGateway implements OnGatewayInit {
 
   afterInit(server: Server) {
     this.events.setServer(server);
+  }
+
+  private emitPresenceSnapshotToAdmin(client: Socket) {
+    const onlineUserIds = [...this.onlineUserConnectionCount.entries()]
+      .filter(([, count]) => count > 0)
+      .map(([userId]) => userId);
+
+    const lastLoginByUserId: Record<string, string> = {};
+    for (const [userId, lastLoginAt] of this.userLastLoginAt.entries()) {
+      lastLoginByUserId[userId] = lastLoginAt;
+    }
+
+    client.emit('presence:snapshot', { onlineUserIds, lastLoginByUserId });
+  }
+
+  private markUserOnline(userId: string) {
+    const prev = this.onlineUserConnectionCount.get(userId) ?? 0;
+    const next = prev + 1;
+    this.onlineUserConnectionCount.set(userId, next);
+
+    if (prev === 0) {
+      const nowIso = new Date().toISOString();
+      this.userLastLoginAt.set(userId, nowIso);
+      this.server.to('admins').emit('presence:user', {
+        userId,
+        online: true,
+        lastLoginAt: nowIso,
+      });
+    }
+  }
+
+  private markUserOffline(userId: string) {
+    const prev = this.onlineUserConnectionCount.get(userId) ?? 0;
+    if (prev <= 1) {
+      this.onlineUserConnectionCount.delete(userId);
+      this.server.to('admins').emit('presence:user', {
+        userId,
+        online: false,
+        lastLoginAt: this.userLastLoginAt.get(userId) ?? null,
+      });
+      return;
+    }
+
+    this.onlineUserConnectionCount.set(userId, prev - 1);
   }
 
   async handleConnection(client: Socket) {
@@ -64,17 +105,27 @@ export class ChatGateway implements OnGatewayInit {
       if (type === 'user') {
         client.data.userId = sub;
         client.join(`user:${sub}`);
+        this.markUserOnline(sub);
         client.emit('connected', { ok: true, type: 'user', userId: sub });
         return;
       }
 
       client.data.adminId = sub;
       client.join(`admin:${sub}`);
+      client.join('admins');
+      this.emitPresenceSnapshotToAdmin(client);
       client.emit('connected', { ok: true, type: 'admin', adminId: sub });
     } catch (e: any) {
       client.emit('connected', { ok: false, reason: e?.message ?? 'unauthorized' });
       client.disconnect(true);
     }
+  }
+
+  handleDisconnect(client: Socket) {
+    if (client.data?.authType !== 'user') return;
+    const userId = client.data?.userId as string | undefined;
+    if (!userId) return;
+    this.markUserOffline(userId);
   }
 
   @SubscribeMessage('conversation:join')

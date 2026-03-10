@@ -1,9 +1,9 @@
+import { API_BASE } from "./api";
+
 export type AppConfigDto = {
   primaryColor: string;
   logoUrl?: string | null;
 };
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
 
 export function getApiBase() {
   return API_BASE;
@@ -17,7 +17,7 @@ export async function fetchAppConfig(): Promise<AppConfigDto> {
 
 /**
  * Converte logoUrl do backend (ex: "/static/uploads/logo_123.png")
- * em URL completa pro browser carregar (ex: "http://localhost:3000/static/uploads/logo_123.png")
+ * em URL completa pro browser carregar (ex: "http://<backend>:3000/static/uploads/logo_123.png")
  * Mantém "/logo_bhash.png" como está (asset do Vite).
  */
 export function resolveLogoUrl(logoUrl: string | null | undefined) {

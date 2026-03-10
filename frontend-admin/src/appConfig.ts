@@ -1,9 +1,9 @@
+import { API_BASE } from "./api";
+
 export type AppConfigDto = {
   primaryColor: string;
   logoUrl?: string | null;
 };
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
 
 export function getApiBase() {
   return API_BASE;

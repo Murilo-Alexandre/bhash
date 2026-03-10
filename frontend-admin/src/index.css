@@ -49,6 +49,22 @@ body{
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }
 
+.admin-page{
+  width: 100%;
+  margin: 0;
+  padding: 18px 12px 56px;
+}
+
+.admin-grid12{
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-card{
+  min-width: 0;
+}
+
 button{
   transition:
     transform 140ms ease,
@@ -142,6 +158,218 @@ button:disabled{
   background: rgba(255,0,0,0.9);
 }
 
+.admin-mobileNavWrap{
+  position: relative;
+}
+
+.admin-hamburgerBtn{
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.28);
+  background: rgba(0,0,0,0.18);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.admin-hamburgerBtn.is-open{
+  background: rgba(255,255,255,0.18);
+  border-color: rgba(255,255,255,0.4);
+}
+
+.admin-mobileNavMenu{
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-bg) 94%, transparent);
+  box-shadow: var(--shadow);
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  z-index: 40;
+}
+
+[data-theme="dark"] .admin-mobileNavMenu{
+  background: rgba(12,12,12,0.96);
+}
+
+.admin-mobileNavItem{
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.admin-mobileNavItem:hover{
+  background: color-mix(in srgb, var(--bhash-primary) 12%, var(--card-bg));
+}
+
+.admin-mobileNavItem.is-active{
+  border-color: color-mix(in srgb, var(--bhash-primary) 42%, var(--border));
+  background: color-mix(in srgb, var(--bhash-primary) 18%, var(--card-bg));
+}
+
+.admin-mobileNavItem--danger{
+  color: #ffb4b4;
+}
+
+@media (max-width: 900px){
+  .admin-page{
+    padding: 14px 10px 44px;
+  }
+
+  .admin-grid12{
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .admin-grid12 > .admin-card{
+    grid-column: 1 / -1 !important;
+  }
+
+  .admin-navActions{
+    width: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .admin-navBtn,
+  .admin-logoutBtn{
+    padding: 8px 11px;
+    font-size: 13px;
+  }
+
+  .admin-mobileNavMenu{
+    min-width: min(82vw, 260px);
+  }
+
+  .admin-usersFiltersRow{
+    gap: 10px;
+  }
+
+  .admin-usersFiltersRow .admin-searchField{
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+  }
+
+  .admin-usersFilterSelect,
+  .admin-usersFilterSelect--sm{
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0 !important;
+  }
+
+  .admin-usersCreateBtn{
+    width: 100%;
+    justify-content: center;
+  }
+
+  .admin-usersActionGroup{
+    gap: 8px;
+  }
+
+  .admin-orgCardRight{
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .admin-orgCreateBtn{
+    width: auto;
+  }
+
+  .admin-orgFiltersRow .admin-searchField{
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+  }
+
+  .admin-historyControlsRow{
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-historyControlsRow input{
+    width: 100%;
+    min-width: 0 !important;
+  }
+
+  .admin-historyControlsRow .admin-searchField{
+    width: 100%;
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+  }
+
+  .admin-historyFilterSelect{
+    width: 100%;
+    min-width: 0 !important;
+    flex: 1 1 100%;
+  }
+
+  .admin-historyCardRight{
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .admin-historyGlobalHit__actions{
+    justify-content: flex-start;
+  }
+
+  .admin-historyContactCard{
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .admin-historyContactsHead{
+    display: none;
+  }
+
+  .admin-historyContactCard--mobile{
+    padding: 12px;
+  }
+
+  .admin-historyContactCard__mobileTop{
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+  }
+
+  .admin-historyContactCard__mobileLines{
+    gap: 8px;
+  }
+
+  .admin-historyContactCard__mobileMeta{
+    font-size: 12px;
+  }
+
+  .admin-historyContactLine__value{
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .admin-historyContactLine{
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .admin-historyContactCard__avatar--mobile{
+    width: 44px;
+    height: 44px;
+  }
+}
+
 .admin-searchField{
   position: relative;
   display: flex;
@@ -175,6 +403,173 @@ button:disabled{
 
 .admin-searchField__input::placeholder{
   color: var(--muted);
+}
+
+.admin-filterToggleBtn{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+  color: var(--fg);
+  font-weight: 800;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.admin-filterToggleBtn__icon{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.admin-filterToggleBtn__state{
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-filterToggleBtn.is-open{
+  border-color: color-mix(in srgb, var(--bhash-primary) 45%, var(--border));
+  background: color-mix(in srgb, var(--bhash-primary) 10%, var(--card-bg));
+}
+
+.admin-usersFiltersRow{
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.admin-usersFilterSelect{
+  min-width: 180px;
+}
+
+.admin-usersFilterSelect--sm{
+  min-width: 120px;
+}
+
+.admin-usersCreateBtn{
+  white-space: nowrap;
+}
+
+.admin-usersTableWrap{
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.admin-usersTable{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  min-width: 980px;
+}
+
+.admin-usersTh{
+  text-align: left;
+}
+
+.admin-usersTh--center{
+  text-align: center;
+}
+
+.admin-usersRow{
+  border-top: 1px solid var(--border);
+}
+
+.admin-usersTd{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-usersTd--center{
+  text-align: center;
+}
+
+.admin-usersTd--mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.admin-usersTd--name{
+  font-weight: 800;
+}
+
+.admin-usersTd--muted{
+  color: var(--muted);
+}
+
+.admin-usersTd--empty{
+  color: var(--muted);
+  text-align: center;
+  padding: 16px 10px !important;
+}
+
+.admin-usersActionGroup{
+  display: inline-flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.admin-usersMobileList{
+  display: grid;
+  gap: 10px;
+}
+
+.admin-userMobileCard{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.admin-userMobileCard__top{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+
+.admin-userMobileCard__row{
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.admin-userMobileCard__label{
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.admin-userMobileCard__value{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-userMobileCard__value--mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.admin-userMobileCard__value--muted{
+  color: var(--muted);
+}
+
+.admin-usersMobileEmpty{
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  color: var(--muted);
+  padding: 16px;
+  text-align: center;
 }
 
 .admin-actionBtn{
@@ -227,6 +622,401 @@ button:disabled{
 
 .admin-actionBtn.is-danger:hover{
   background: color-mix(in srgb, #ef4444 12%, var(--card-bg));
+}
+
+.admin-orgCardRight{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.admin-orgCreateBtn{
+  white-space: nowrap;
+}
+
+.admin-orgFiltersRow{
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.admin-orgTableWrap{
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.admin-orgTable{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  min-width: 680px;
+}
+
+.admin-orgTh{
+  text-align: left;
+}
+
+.admin-orgTh--center{
+  text-align: center;
+}
+
+.admin-orgRow{
+  border-top: 1px solid var(--border);
+}
+
+.admin-orgTd{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-orgTd--name{
+  font-weight: 900;
+}
+
+.admin-orgTd--center{
+  text-align: center;
+}
+
+.admin-orgTd--muted{
+  color: var(--muted);
+}
+
+.admin-orgTd--empty{
+  color: var(--muted);
+  text-align: center;
+  padding: 16px 10px !important;
+}
+
+.admin-orgActionGroup{
+  display: inline-flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.admin-orgMobileList{
+  display: grid;
+  gap: 10px;
+}
+
+.admin-orgMobileCard{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--card-bg) 78%, transparent);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.admin-orgMobileCard__name{
+  font-weight: 900;
+}
+
+.admin-orgMobileCard__meta{
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-orgMobileEmpty{
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  color: var(--muted);
+  padding: 16px;
+  text-align: center;
+}
+
+.admin-historySubtitle{
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.admin-historyControlsRow{
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.admin-historyFilterSelect{
+  min-width: 190px;
+}
+
+.admin-historyControlsRow--spaced{
+  margin-bottom: 12px;
+}
+
+.admin-historyCardRight{
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.admin-historyCardRight--mobile{
+  width: 100%;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.admin-historyGlobalHits{
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.admin-historyGlobalHit{
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(140deg, color-mix(in srgb, var(--bhash-primary) 9%, transparent), transparent 70%),
+    color-mix(in srgb, var(--card-bg) 82%, transparent);
+  display: grid;
+  gap: 10px;
+}
+
+.admin-historyGlobalHit__meta{
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.admin-historyGlobalHit__body{
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.admin-historyGlobalHit__actions{
+  display: flex;
+  justify-content: flex-end;
+}
+
+.admin-historyInfoText{
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.admin-historyContactsList,
+.admin-historyConvsList{
+  display: grid;
+  gap: 10px;
+}
+
+.admin-historyContactsHead{
+  display: grid;
+  grid-template-columns: 56px minmax(210px, 1fr) minmax(180px, 0.9fr) minmax(220px, 1fr) minmax(140px, 0.7fr) minmax(140px, 0.7fr);
+  gap: 12px;
+  padding: 0 12px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.admin-historyContactCard{
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--bhash-primary) 6%, transparent), transparent 78%),
+    color-mix(in srgb, var(--card-bg) 82%, transparent);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  color: var(--fg);
+  width: 100%;
+  display: grid;
+  grid-template-columns: 56px minmax(210px, 1fr) minmax(180px, 0.9fr) minmax(220px, 1fr) minmax(140px, 0.7fr) minmax(140px, 0.7fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-historyContactCard__avatar{
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bhash-primary) 22%, transparent);
+  color: #fff;
+  font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.admin-historyContactCard__avatar img{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.admin-historyContactCard__identity{
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.admin-historyContactCard__name{
+  font-weight: 900;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-historyContactCard__username{
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-historyContactCard__col{
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.admin-historyContactCard__small{
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-historyContactCard__email{
+  min-width: 0;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-historyContactCard__date{
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.admin-historyContactCard--mobile{
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+.admin-historyContactCard__mobileTop{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.admin-historyContactCard__mobileLines{
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.admin-historyContactLine{
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.admin-historyContactLine__label{
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.admin-historyContactLine__value{
+  min-width: 0;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.admin-historyContactCard__avatar--mobile{
+  width: 46px;
+  height: 46px;
+}
+
+.admin-historyContactCard__mobileMeta{
+  color: var(--muted);
+  font-size: 13px;
+  padding-top: 2px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  margin-top: 2px;
+  padding-right: 6px;
+}
+
+.admin-liveStatusBadge{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #22c55e 55%, var(--border));
+  background: color-mix(in srgb, #22c55e 18%, transparent);
+  color: #8cf3b0;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  width: fit-content;
+}
+
+.admin-liveStatusBadge__dot{
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55);
+  animation: admin-livePulse 1.8s ease-out infinite;
+}
+
+@keyframes admin-livePulse{
+  0%{
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+  }
+  70%{
+    box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+  }
+  100%{
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+  }
+}
+
+.admin-historyConvCard{
+  text-align: left;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--bhash-primary) 8%, transparent), transparent 75%),
+    color-mix(in srgb, var(--card-bg) 82%, transparent);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  color: var(--fg);
+  width: 100%;
+}
+
+.admin-historyEmpty{
+  color: var(--muted);
 }
 
 .appcfg-grid{
@@ -477,6 +1267,10 @@ button:disabled{
 }
 
 @media (max-width: 960px){
+  .appcfg-grid > .admin-card{
+    grid-column: 1 / -1 !important;
+  }
+
   .appcfg-logoGrid{
     grid-template-columns: 1fr;
   }

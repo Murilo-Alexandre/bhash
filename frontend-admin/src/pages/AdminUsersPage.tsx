@@ -65,6 +65,8 @@ export function AdminUsersPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editUser, setEditUser] = useState<UserRow | null>(null);
+  const [isMobileFilters, setIsMobileFilters] = useState(() => window.innerWidth <= 900);
+  const [filtersOpen, setFiltersOpen] = useState(() => window.innerWidth > 900);
 
   async function loadOrgs() {
     try {
@@ -159,6 +161,16 @@ export function AdminUsersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q]);
 
+  useEffect(() => {
+    const onResize = () => {
+      const nextMobile = window.innerWidth <= 900;
+      setIsMobileFilters(nextMobile);
+      if (!nextMobile) setFiltersOpen(true);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   const total = data?.total ?? 0;
 
   const items = data?.items ?? [];
@@ -168,207 +180,274 @@ export function AdminUsersPage() {
     return `${total} usuário${total === 1 ? "" : "s"}`;
   }, [loading, total]);
 
+  async function toggleUserActive(u: UserRow) {
+    await api.patch(`/admin/users/${u.id}`, { isActive: !u.isActive });
+    await load();
+  }
+
+  async function deleteUser(u: UserRow) {
+    const ok = confirm(`Excluir o usuário "${u.username}"? Essa ação não pode ser desfeita.`);
+    if (!ok) return;
+    await api.delete(`/admin/users/${u.id}`);
+    await load();
+  }
+
   return (
-    <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
+    <div className="admin-page">
       <h1 style={{ margin: 0, marginBottom: 12 }}>Usuários</h1>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+      <div className="admin-grid12">
         <Card title="Filtros" colSpan={12} right={headerRight}>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
-              <span className="admin-searchField__icon" aria-hidden="true">
-                <SearchIcon />
-              </span>
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Buscar"
-                className="admin-searchField__input"
-              />
-            </div>
-
-            <select
-              value={companyId}
-              onChange={(e) => {
-                setCompanyId(e.target.value);
-                setDepartmentId(""); // reseta setor ao trocar empresa
-              }}
-              style={{
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--input-border)",
-                background: "var(--input-bg)",
-                color: "var(--input-fg)",
-                outline: "none",
-                minWidth: 180,
-              }}
-            >
-              <option value="">Todas as empresas</option>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={departmentId}
-              onChange={(e) => {
-                setDepartmentId(e.target.value);
-              }}
-              style={{
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--input-border)",
-                background: "var(--input-bg)",
-                color: "var(--input-fg)",
-                outline: "none",
-                minWidth: 180,
-              }}
-            >
-              <option value="">Todos os setores</option>
-              {departments.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={activeFilter}
-              onChange={(e) => {
-                setActiveFilter(e.target.value as ActiveFilter);
-              }}
-              style={{
-                padding: "12px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--input-border)",
-                background: "var(--input-bg)",
-                color: "var(--input-fg)",
-                outline: "none",
-                minWidth: 120,
-              }}
-            >
-              <option value="all">Todos</option>
-              <option value="active">Ativos</option>
-              <option value="inactive">Inativos</option>
-            </select>
-
+          {isMobileFilters ? (
             <button
-              onClick={() => setCreateOpen(true)}
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: "1px solid var(--border)",
-                background: "var(--btn-bg)",
-                color: "var(--btn-fg)",
-                fontWeight: 900,
-                cursor: "pointer",
-              }}
+              className={`admin-filterToggleBtn ${filtersOpen ? "is-open" : ""}`}
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-expanded={filtersOpen}
             >
-              + Criar usuário
+              <span className="admin-filterToggleBtn__icon" aria-hidden="true">
+                <FilterIcon />
+              </span>
+              <span>Filtros</span>
+              <span className="admin-filterToggleBtn__state">{filtersOpen ? "Ocultar" : "Mostrar"}</span>
             </button>
-          </div>
+          ) : null}
+
+          {!isMobileFilters || filtersOpen ? (
+            <div className="admin-usersFiltersRow">
+              <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
+                <span className="admin-searchField__icon" aria-hidden="true">
+                  <SearchIcon />
+                </span>
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Buscar"
+                  className="admin-searchField__input"
+                />
+              </div>
+
+              <select
+                className="admin-usersFilterSelect"
+                value={companyId}
+                onChange={(e) => {
+                  setCompanyId(e.target.value);
+                  setDepartmentId(""); // reseta setor ao trocar empresa
+                }}
+                style={{
+                  padding: "12px 12px",
+                  borderRadius: 12,
+                  border: "1px solid var(--input-border)",
+                  background: "var(--input-bg)",
+                  color: "var(--input-fg)",
+                  outline: "none",
+                  minWidth: 180,
+                }}
+              >
+                <option value="">Todas as empresas</option>
+                {companies.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                className="admin-usersFilterSelect"
+                value={departmentId}
+                onChange={(e) => {
+                  setDepartmentId(e.target.value);
+                }}
+                style={{
+                  padding: "12px 12px",
+                  borderRadius: 12,
+                  border: "1px solid var(--input-border)",
+                  background: "var(--input-bg)",
+                  color: "var(--input-fg)",
+                  outline: "none",
+                  minWidth: 180,
+                }}
+              >
+                <option value="">Todos os setores</option>
+                {departments.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                className="admin-usersFilterSelect admin-usersFilterSelect--sm"
+                value={activeFilter}
+                onChange={(e) => {
+                  setActiveFilter(e.target.value as ActiveFilter);
+                }}
+                style={{
+                  padding: "12px 12px",
+                  borderRadius: 12,
+                  border: "1px solid var(--input-border)",
+                  background: "var(--input-bg)",
+                  color: "var(--input-fg)",
+                  outline: "none",
+                  minWidth: 120,
+                }}
+              >
+                <option value="all">Todos</option>
+                <option value="active">Ativos</option>
+                <option value="inactive">Inativos</option>
+              </select>
+
+              <button
+                className="admin-usersCreateBtn"
+                onClick={() => setCreateOpen(true)}
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  border: "1px solid var(--border)",
+                  background: "var(--btn-bg)",
+                  color: "var(--btn-fg)",
+                  fontWeight: 900,
+                  cursor: "pointer",
+                }}
+              >
+                + Criar usuário
+              </button>
+            </div>
+          ) : null}
 
           {msg ? <div style={{ marginTop: 10, color: "#ff8a8a", fontSize: 13 }}>{msg}</div> : null}
         </Card>
 
         <Card title="Lista" colSpan={12}>
-          <div style={{ borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
-              <colgroup>
-                <col style={{ width: 120 }} />
-                <col style={{ width: 190 }} />
-                <col />
-                <col style={{ width: 170 }} />
-                <col style={{ width: 170 }} />
-                <col style={{ width: 170 }} />
-              </colgroup>
-              <thead>
-                <tr>
-                  <Th style={{ textAlign: "center" }}>Status</Th>
-                  <Th>Username</Th>
-                  <Th>Nome</Th>
-                  <Th style={{ textAlign: "center" }}>Criado</Th>
-                  <Th style={{ textAlign: "center" }}>Último login</Th>
-                  <Th style={{ textAlign: "center" }}>Ações</Th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {loading ? (
+          {!isMobileFilters ? (
+            <div className="admin-usersTableWrap">
+              <table className="admin-usersTable">
+                <colgroup>
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "15%" }} />
+                  <col style={{ width: "28%" }} />
+                  <col style={{ width: "16%" }} />
+                  <col style={{ width: "16%" }} />
+                  <col style={{ width: "15%" }} />
+                </colgroup>
+                <thead>
                   <tr>
-                    <Td colSpan={6} style={{ color: "var(--muted)", padding: 14 }}>
-                      Carregando…
-                    </Td>
+                    <Th className="admin-usersTh admin-usersTh--center">Status</Th>
+                    <Th className="admin-usersTh">Username</Th>
+                    <Th className="admin-usersTh">Nome</Th>
+                    <Th className="admin-usersTh admin-usersTh--center">Criado</Th>
+                    <Th className="admin-usersTh admin-usersTh--center">Último login</Th>
+                    <Th className="admin-usersTh admin-usersTh--center">Ações</Th>
                   </tr>
-                ) : items.length === 0 ? (
-                  <tr>
-                    <Td colSpan={6} style={{ color: "var(--muted)", padding: 14 }}>
-                      Nenhum usuário encontrado.
-                    </Td>
-                  </tr>
-                ) : (
-                  items.map((u) => (
-                    <tr key={u.id} style={{ borderTop: "1px solid var(--border)" }}>
-                      <Td style={{ textAlign: "center" }}>
-                        <StatusPill active={u.isActive} />
-                      </Td>
-                      <Td
-                        style={{
-                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
-                        {u.username}
-                      </Td>
-                      <Td style={{ fontWeight: 800 }}>{u.name}</Td>
-                      <Td style={{ color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap" }}>
-                        {fmt(u.createdAt)}
-                      </Td>
-                      <Td style={{ color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap" }}>
-                        {u.lastLoginAt ? fmt(u.lastLoginAt) : "—"}
-                      </Td>
+                </thead>
 
-                      <Td style={{ textAlign: "center" }}>
-                        <div style={{ display: "inline-flex", gap: 10, justifyContent: "center" }}>
-                          <IconButton title="Editar" onClick={() => setEditUser(u)} tone="neutral">
-                            <IconPencil />
-                          </IconButton>
-
-                          <IconButton
-                            title={u.isActive ? "Desativar" : "Ativar"}
-                            tone={u.isActive ? "warning" : "success"}
-                            onClick={async () => {
-                              await api.patch(`/admin/users/${u.id}`, { isActive: !u.isActive });
-                              await load();
-                            }}
-                          >
-                            <IconPower />
-                          </IconButton>
-
-                          <IconButton
-                            title="Excluir"
-                            tone="danger"
-                            onClick={async () => {
-                              const ok = confirm(`Excluir o usuário "${u.username}"? Essa ação não pode ser desfeita.`);
-                              if (!ok) return;
-                              await api.delete(`/admin/users/${u.id}`);
-                              await load();
-                            }}
-                          >
-                            <IconTrash />
-                          </IconButton>
-                        </div>
+                <tbody>
+                  {loading ? (
+                    <tr>
+                      <Td colSpan={6} className="admin-usersTd admin-usersTd--empty">
+                        Carregando…
                       </Td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  ) : items.length === 0 ? (
+                    <tr>
+                      <Td colSpan={6} className="admin-usersTd admin-usersTd--empty">
+                        Nenhum usuário encontrado.
+                      </Td>
+                    </tr>
+                  ) : (
+                    items.map((u) => (
+                      <tr key={u.id} className="admin-usersRow">
+                        <Td className="admin-usersTd admin-usersTd--center">
+                          <StatusPill active={u.isActive} />
+                        </Td>
+                        <Td className="admin-usersTd admin-usersTd--mono" title={u.username}>
+                          {u.username}
+                        </Td>
+                        <Td className="admin-usersTd admin-usersTd--name" title={u.name}>
+                          {u.name}
+                        </Td>
+                        <Td className="admin-usersTd admin-usersTd--center admin-usersTd--muted">
+                          {fmt(u.createdAt)}
+                        </Td>
+                        <Td className="admin-usersTd admin-usersTd--center admin-usersTd--muted">
+                          {u.lastLoginAt ? fmt(u.lastLoginAt) : "—"}
+                        </Td>
+
+                        <Td className="admin-usersTd admin-usersTd--center">
+                          <div className="admin-usersActionGroup">
+                            <IconButton title="Editar" onClick={() => setEditUser(u)} tone="neutral">
+                              <IconPencil />
+                            </IconButton>
+
+                            <IconButton
+                              title={u.isActive ? "Desativar" : "Ativar"}
+                              tone={u.isActive ? "warning" : "success"}
+                              onClick={() => toggleUserActive(u)}
+                            >
+                              <IconPower />
+                            </IconButton>
+
+                            <IconButton title="Excluir" tone="danger" onClick={() => deleteUser(u)}>
+                              <IconTrash />
+                            </IconButton>
+                          </div>
+                        </Td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="admin-usersMobileList">
+              {loading ? (
+                <div className="admin-usersMobileEmpty">Carregando…</div>
+              ) : items.length === 0 ? (
+                <div className="admin-usersMobileEmpty">Nenhum usuário encontrado.</div>
+              ) : (
+                items.map((u) => (
+                  <article key={u.id} className="admin-userMobileCard">
+                    <div className="admin-userMobileCard__top">
+                      <StatusPill active={u.isActive} />
+                      <div className="admin-usersActionGroup">
+                        <IconButton title="Editar" onClick={() => setEditUser(u)} tone="neutral">
+                          <IconPencil />
+                        </IconButton>
+                        <IconButton
+                          title={u.isActive ? "Desativar" : "Ativar"}
+                          tone={u.isActive ? "warning" : "success"}
+                          onClick={() => toggleUserActive(u)}
+                        >
+                          <IconPower />
+                        </IconButton>
+                        <IconButton title="Excluir" tone="danger" onClick={() => deleteUser(u)}>
+                          <IconTrash />
+                        </IconButton>
+                      </div>
+                    </div>
+
+                    <div className="admin-userMobileCard__row">
+                      <span className="admin-userMobileCard__label">Nome</span>
+                      <strong className="admin-userMobileCard__value">{u.name}</strong>
+                    </div>
+                    <div className="admin-userMobileCard__row">
+                      <span className="admin-userMobileCard__label">Username</span>
+                      <span className="admin-userMobileCard__value admin-userMobileCard__value--mono">{u.username}</span>
+                    </div>
+                    <div className="admin-userMobileCard__row">
+                      <span className="admin-userMobileCard__label">Criado</span>
+                      <span className="admin-userMobileCard__value admin-userMobileCard__value--muted">{fmt(u.createdAt)}</span>
+                    </div>
+                    <div className="admin-userMobileCard__row">
+                      <span className="admin-userMobileCard__label">Último login</span>
+                      <span className="admin-userMobileCard__value admin-userMobileCard__value--muted">
+                        {u.lastLoginAt ? fmt(u.lastLoginAt) : "—"}
+                      </span>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          )}
         </Card>
       </div>
 
@@ -437,6 +516,7 @@ export function AdminUsersPage() {
 function Card({ title, colSpan, right, children }: { title: string; colSpan: number; right?: React.ReactNode; children: any }) {
   return (
     <div
+      className="admin-card"
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,
@@ -980,6 +1060,14 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: b
 }
 
 /** ===== ÍCONES (SVG) — sem emoji ===== */
+function FilterIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function SearchIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">

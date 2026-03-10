@@ -2,6 +2,7 @@ services:
   postgres:
     image: postgres:16
     container_name: bhash-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: bhash
       POSTGRES_USER: bhash
@@ -14,6 +15,7 @@ services:
   redis:
     image: redis:7
     container_name: bhash-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
 

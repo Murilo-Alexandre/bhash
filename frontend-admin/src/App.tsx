@@ -20,10 +20,20 @@ type Me = {
   mustChangeCredentials: boolean;
 };
 
+function MenuIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export default function App() {
   const { isAuthenticated, logout, api } = useAdminAuth();
   const { theme, toggle, logoUrl } = useTheme();
   const [page, setPage] = useState<PageKey>("dashboard");
+  const [isMobileNav, setIsMobileNav] = useState(() => window.innerWidth <= 900);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const [me, setMe] = useState<Me | null>(null);
   const [loadingMe, setLoadingMe] = useState(false);
@@ -48,6 +58,23 @@ export default function App() {
     loadMe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    const onResize = () => setIsMobileNav(window.innerWidth <= 900);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [page, isMobileNav]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const close = () => setMobileNavOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [mobileNavOpen]);
 
   if (!isAuthenticated) return <AdminLoginPage />;
 
@@ -93,49 +120,102 @@ export default function App() {
         onToggleTheme={toggle}
         logoSrc={logoUrl}
         rightSlot={
-          <div className="admin-navActions">
-            <button
-              onClick={() => setPage("dashboard")}
-              className={`admin-navBtn ${page === "dashboard" ? "is-active" : ""}`}
-              aria-current={page === "dashboard" ? "page" : undefined}
-            >
-              Dashboard
-            </button>
-            <button
-              onClick={() => setPage("appConfig")}
-              className={`admin-navBtn ${page === "appConfig" ? "is-active" : ""}`}
-              aria-current={page === "appConfig" ? "page" : undefined}
-            >
-              Config App
-            </button>
-            <button
-              onClick={() => setPage("users")}
-              className={`admin-navBtn ${page === "users" ? "is-active" : ""}`}
-              aria-current={page === "users" ? "page" : undefined}
-            >
-              Usuários
-            </button>
+          isMobileNav ? (
+            <div className="admin-mobileNavWrap" onClick={(e) => e.stopPropagation()}>
+              <button
+                className={`admin-hamburgerBtn ${mobileNavOpen ? "is-open" : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMobileNavOpen((v) => !v);
+                }}
+                title="Abrir menu"
+              >
+                <MenuIcon />
+              </button>
 
-            <button
-              onClick={() => setPage("org")}
-              className={`admin-navBtn ${page === "org" ? "is-active" : ""}`}
-              aria-current={page === "org" ? "page" : undefined}
-            >
-              Empresas/Setores
-            </button>
+              {mobileNavOpen ? (
+                <div className="admin-mobileNavMenu" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={() => setPage("dashboard")}
+                    className={`admin-mobileNavItem ${page === "dashboard" ? "is-active" : ""}`}
+                  >
+                    Dashboard
+                  </button>
+                  <button
+                    onClick={() => setPage("appConfig")}
+                    className={`admin-mobileNavItem ${page === "appConfig" ? "is-active" : ""}`}
+                  >
+                    Config App
+                  </button>
+                  <button
+                    onClick={() => setPage("users")}
+                    className={`admin-mobileNavItem ${page === "users" ? "is-active" : ""}`}
+                  >
+                    Usuários
+                  </button>
+                  <button
+                    onClick={() => setPage("org")}
+                    className={`admin-mobileNavItem ${page === "org" ? "is-active" : ""}`}
+                  >
+                    Empresas/Setores
+                  </button>
+                  <button
+                    onClick={() => setPage("history")}
+                    className={`admin-mobileNavItem ${page === "history" ? "is-active" : ""}`}
+                  >
+                    Históricos
+                  </button>
+                  <button onClick={logout} className="admin-mobileNavItem admin-mobileNavItem--danger">
+                    Sair
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="admin-navActions">
+              <button
+                onClick={() => setPage("dashboard")}
+                className={`admin-navBtn ${page === "dashboard" ? "is-active" : ""}`}
+                aria-current={page === "dashboard" ? "page" : undefined}
+              >
+                Dashboard
+              </button>
+              <button
+                onClick={() => setPage("appConfig")}
+                className={`admin-navBtn ${page === "appConfig" ? "is-active" : ""}`}
+                aria-current={page === "appConfig" ? "page" : undefined}
+              >
+                Config App
+              </button>
+              <button
+                onClick={() => setPage("users")}
+                className={`admin-navBtn ${page === "users" ? "is-active" : ""}`}
+                aria-current={page === "users" ? "page" : undefined}
+              >
+                Usuários
+              </button>
 
-            <button
-              onClick={() => setPage("history")}
-              className={`admin-navBtn ${page === "history" ? "is-active" : ""}`}
-              aria-current={page === "history" ? "page" : undefined}
-            >
-              Históricos
-            </button>
+              <button
+                onClick={() => setPage("org")}
+                className={`admin-navBtn ${page === "org" ? "is-active" : ""}`}
+                aria-current={page === "org" ? "page" : undefined}
+              >
+                Empresas/Setores
+              </button>
 
-            <button onClick={logout} className="admin-logoutBtn">
-              Sair
-            </button>
-          </div>
+              <button
+                onClick={() => setPage("history")}
+                className={`admin-navBtn ${page === "history" ? "is-active" : ""}`}
+                aria-current={page === "history" ? "page" : undefined}
+              >
+                Históricos
+              </button>
+
+              <button onClick={logout} className="admin-logoutBtn">
+                Sair
+              </button>
+            </div>
+          )
         }
       />
 

@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import { useAdminAuth } from "../adminAuth";
+import { API_BASE } from "../api";
 import { createAdminSocket } from "../socket";
 
 /** ============================
@@ -13,6 +14,9 @@ type Contact = {
   name: string;
   email?: string | null;
   extension?: string | null;
+  avatarUrl?: string | null;
+  createdAt?: string;
+  lastLoginAt?: string | null;
   isActive?: boolean;
   company?: { id: string; name: string } | null;
   department?: { id: string; name: string } | null;
@@ -71,6 +75,16 @@ type GlobalHit = {
 type ViewMode = "contacts" | "userConversations" | "conversation";
 
 type SearchMode = "normal" | "exact";
+type OrgFilterItem = { id: string; name: string };
+type PresenceSnapshotPayload = {
+  onlineUserIds?: string[];
+  lastLoginByUserId?: Record<string, string>;
+};
+type PresenceUserPayload = {
+  userId?: string;
+  online?: boolean;
+  lastLoginAt?: string | null;
+};
 
 /** ============================
  *  Utils
@@ -179,6 +193,33 @@ function SearchIcon({ size = 18 }: { size?: number }) {
   );
 }
 
+function compareAlpha(a?: string | null, b?: string | null) {
+  return (a ?? "").localeCompare(b ?? "", "pt-BR", { sensitivity: "base", numeric: true });
+}
+
+function contactAvatarUrl(raw?: string | null) {
+  if (!raw) return null;
+  if (/^(https?:)?\/\//i.test(raw) || raw.startsWith("data:") || raw.startsWith("blob:")) return raw;
+  return raw.startsWith("/") ? `${API_BASE}${raw}` : `${API_BASE}/${raw}`;
+}
+
+function FilterIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function OnlineBadge() {
+  return (
+    <span className="admin-liveStatusBadge">
+      <span className="admin-liveStatusBadge__dot" aria-hidden="true" />
+      Online
+    </span>
+  );
+}
+
 function ModeToggle({
   value,
   onChange,
@@ -217,16 +258,20 @@ export function AdminHistoryPage() {
   const { api, token, logout } = useAdminAuth();
 
   const [mode, setMode] = useState<ViewMode>("contacts");
+  const [isMobileLayout, setIsMobileLayout] = useState(() => window.innerWidth <= 900);
+  const [contactsFiltersOpen, setContactsFiltersOpen] = useState(() => window.innerWidth > 900);
 
   // ====== CONTATOS ======
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [contactsQ, setContactsQ] = useState("");
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsMsg, setContactsMsg] = useState<string | null>(null);
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
 
-  // filtros opcionais (se quiser usar depois)
-  const [companyId] = useState("");
-  const [departmentId] = useState("");
+  const [companyId, setCompanyId] = useState("");
+  const [departmentId, setDepartmentId] = useState("");
+  const [companyOptions, setCompanyOptions] = useState<OrgFilterItem[]>([]);
+  const [departmentOptions, setDepartmentOptions] = useState<OrgFilterItem[]>([]);
 
   // ====== BUSCA GLOBAL ======
   const [globalQ, setGlobalQ] = useState("");
@@ -264,8 +309,89 @@ export function AdminHistoryPage() {
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const presenceSocketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    const onResize = () => {
+      const nextMobile = window.innerWidth <= 900;
+      setIsMobileLayout(nextMobile);
+      if (!nextMobile) setContactsFiltersOpen(true);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setOnlineUserIds(new Set());
+      return;
+    }
+
+    const s = createAdminSocket(token);
+    presenceSocketRef.current = s;
+
+    s.on("presence:snapshot", (payload: PresenceSnapshotPayload) => {
+      const nextOnline = Array.isArray(payload?.onlineUserIds) ? payload.onlineUserIds : [];
+      setOnlineUserIds(new Set(nextOnline));
+
+      const lastLoginByUserId = payload?.lastLoginByUserId ?? {};
+      setContacts((prev) =>
+        prev.map((item) => {
+          const next = lastLoginByUserId[item.id];
+          if (!next || next === item.lastLoginAt) return item;
+          return { ...item, lastLoginAt: next };
+        })
+      );
+    });
+
+    s.on("presence:user", (payload: PresenceUserPayload) => {
+      const userId = payload?.userId;
+      if (!userId) return;
+
+      setOnlineUserIds((prev) => {
+        const next = new Set(prev);
+        if (payload.online) next.add(userId);
+        else next.delete(userId);
+        return next;
+      });
+
+      if (payload.lastLoginAt) {
+        setContacts((prev) =>
+          prev.map((item) => {
+            if (item.id !== userId || item.lastLoginAt === payload.lastLoginAt) return item;
+            return { ...item, lastLoginAt: payload.lastLoginAt ?? item.lastLoginAt };
+          })
+        );
+      }
+    });
+
+    return () => {
+      try {
+        s.disconnect();
+      } catch {}
+      presenceSocketRef.current = null;
+    };
+  }, [token]);
 
   // ====== LOAD CONTATOS ======
+  async function loadContactFilters() {
+    try {
+      const [companiesRes, departmentsRes] = await Promise.all([
+        api.get<{ ok: boolean; items: OrgFilterItem[] }>("/admin/org/companies"),
+        api.get<{ ok: boolean; items: OrgFilterItem[] }>("/admin/org/departments"),
+      ]);
+
+      const companies = [...(companiesRes.data.items ?? [])].sort((a, b) => compareAlpha(a.name, b.name));
+      const departments = [...(departmentsRes.data.items ?? [])].sort((a, b) => compareAlpha(a.name, b.name));
+
+      setCompanyOptions(companies);
+      setDepartmentOptions(departments);
+    } catch {
+      setCompanyOptions([]);
+      setDepartmentOptions([]);
+    }
+  }
+
   async function loadContacts() {
     setContactsLoading(true);
     setContactsMsg(null);
@@ -301,15 +427,38 @@ export function AdminHistoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
+  useEffect(() => {
+    if (mode !== "contacts") return;
+    void loadContactFilters();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
   const filteredContacts = useMemo(() => {
-    const q = contactsQ.trim().toLowerCase();
-    if (!q) return contacts;
-    return contacts.filter(
-      (c) =>
-        (c.name ?? "").toLowerCase().includes(q) ||
-        (c.username ?? "").toLowerCase().includes(q)
-    );
-  }, [contacts, contactsQ]);
+    const q = normalizeText(contactsQ.trim());
+
+    const out = contacts.filter((c) => {
+      const matchesCompany = !companyId || c.company?.id === companyId;
+      const matchesDepartment = !departmentId || c.department?.id === departmentId;
+      if (!matchesCompany || !matchesDepartment) return false;
+
+      if (!q) return true;
+
+      const haystack = normalizeText(
+        [
+          c.name ?? "",
+          c.username ?? "",
+          c.email ?? "",
+          c.extension ?? "",
+          c.company?.name ?? "",
+          c.department?.name ?? "",
+        ].join(" ")
+      );
+
+      return haystack.includes(q);
+    });
+
+    return out.sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
+  }, [contacts, contactsQ, companyId, departmentId]);
 
   // ====== BUSCA GLOBAL (API + filtro local por modo/acento/caixa) ======
   async function runGlobalSearch(qRaw: string) {
@@ -332,8 +481,6 @@ export function AdminHistoryPage() {
             q,
             page: 1,
             pageSize: 60,
-            ...(companyId ? { companyId } : {}),
-            ...(departmentId ? { departmentId } : {}),
           },
         }
       );
@@ -369,7 +516,7 @@ export function AdminHistoryPage() {
 
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalQ, globalMode, mode, companyId, departmentId]);
+  }, [globalQ, globalMode, mode]);
 
   // ====== LOAD CONVERSAS DO USER ======
   async function openUser(u: Contact) {
@@ -760,53 +907,48 @@ export function AdminHistoryPage() {
   }, [mode, pendingScrollToId, messages]);
 
   return (
-    <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
+    <div className="admin-page">
       <h1 style={{ margin: 0, marginBottom: 6 }}>Históricos</h1>
-      <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 12 }}>{headerSubtitle}</div>
+      <div className="admin-historySubtitle">{headerSubtitle}</div>
 
       {mode === "contacts" ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+        <div className="admin-grid12">
           <Card title="Busca Global" colSpan={12}>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <div className="admin-historyControlsRow">
               <input
                 value={globalQ}
                 onChange={(e) => setGlobalQ(e.target.value)}
-                placeholder='Pesquise uma palavra'
+                placeholder="Pesquise uma palavra"
                 style={inputStyle({ flex: 1, minWidth: 260 })}
               />
 
               <ModeToggle value={globalMode} onChange={setGlobalMode} />
             </div>
 
+            <div className="admin-historyInfoText">
+              {globalMode === "normal" ? (
+                <>
+                  <strong>Normal:</strong> encontra palavras que contenham o termo.{" "}
+                  <strong>| Pesquisa:</strong> Casa <strong>→ Resultado:</strong> Casa, Casamento, Casarão...
+                </>
+              ) : (
+                <>
+                  <strong>Exata:</strong> mostra apenas resultados exatamente iguais ao termo.{" "}
+                  <strong>| Pesquisa:</strong> Casa <strong>→ Resultado:</strong> Casa
+                </>
+              )}
+            </div>
+
             {globalErr ? <div style={{ marginTop: 10, color: "#ff8a8a", fontSize: 13 }}>{globalErr}</div> : null}
 
             {globalHits.length > 0 ? (
-              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+              <div className="admin-historyGlobalHits">
                 {globalHits.map((h) => {
                   const a = h.conversation.userA;
                   const b = h.conversation.userB;
                   return (
-                    <div
-                      key={h.id}
-                      style={{
-                        padding: 12,
-                        borderRadius: 16,
-                        border: "1px solid var(--border)",
-                        background: "rgba(255,255,255,0.02)",
-                        display: "grid",
-                        gap: 10,
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: "var(--muted)",
-                          display: "flex",
-                          gap: 10,
-                          flexWrap: "wrap",
-                          alignItems: "center",
-                        }}
-                      >
+                    <div key={h.id} className="admin-historyGlobalHit">
+                      <div className="admin-historyGlobalHit__meta">
                         <span>
                           {a.name} ↔ {b.name}
                         </span>
@@ -816,22 +958,14 @@ export function AdminHistoryPage() {
                         <span>por {h.sender.name}</span>
                       </div>
 
-                      <div style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.35 }}>
+                      <div className="admin-historyGlobalHit__body">
                         <HighlightText text={h.bodyPreview} query={globalQ.trim()} />
                       </div>
 
-                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <div className="admin-historyGlobalHit__actions">
                         <button
                           onClick={() => openFromGlobal(h)}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: "1px solid var(--border)",
-                            background: "transparent",
-                            color: "var(--fg)",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
+                          style={ghostBtn(false)}
                           title="Abrir a conversa completa e ir até esta mensagem"
                         >
                           Ver conversa completa
@@ -841,27 +975,16 @@ export function AdminHistoryPage() {
                   );
                 })}
               </div>
-            ) : (
-            <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.4 }}>
-              {globalQ.trim().length === 0 ? (
-                <>
-                  <strong>Normal:</strong> encontra palavras que contenham o termo. <strong> | <u>Pesquisa:</u> Casa → <u>Resultado:</u></strong> <strong>Casa</strong>, <strong>Casa</strong>mento, <strong>Casa</strong>rão...<br/>
-                  <strong>Exata:</strong> mostra apenas resultados exatamente iguais ao termo. <strong> | <u>Pesquisa:</u></strong> Casa <strong>→ <u>Resultado:</u></strong> <strong>Casa</strong>
-                </>
-              ) : globalLoading ? (
-                "Buscando..."
-              ) : (
-                "Nenhum resultado."
-              )}
-            </div>
-            )}
+            ) : globalQ.trim().length > 0 ? (
+              <div className="admin-historyInfoText">{globalLoading ? "Buscando..." : "Nenhum resultado."}</div>
+            ) : null}
           </Card>
 
           <Card
-            title="Contatos"
+            title="Pesquisa por usuário"
             colSpan={12}
             right={
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div className={`admin-historyCardRight ${isMobileLayout ? "admin-historyCardRight--mobile" : ""}`}>
                 <button onClick={loadContacts} style={ghostBtn(contactsLoading)}>
                   {contactsLoading ? "Atualizando..." : "Atualizar"}
                 </button>
@@ -871,40 +994,164 @@ export function AdminHistoryPage() {
               </div>
             }
           >
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-              <input
-                value={contactsQ}
-                onChange={(e) => setContactsQ(e.target.value)}
-                placeholder="Buscar contato (nome / username)"
-                style={inputStyle({ flex: 1, minWidth: 260 })}
-              />
-            </div>
+            {isMobileLayout ? (
+              <button
+                className={`admin-filterToggleBtn ${contactsFiltersOpen ? "is-open" : ""}`}
+                onClick={() => setContactsFiltersOpen((v) => !v)}
+                aria-expanded={contactsFiltersOpen}
+              >
+                <span className="admin-filterToggleBtn__icon" aria-hidden="true">
+                  <FilterIcon />
+                </span>
+                <span>Filtros</span>
+                <span className="admin-filterToggleBtn__state">{contactsFiltersOpen ? "Ocultar" : "Mostrar"}</span>
+              </button>
+            ) : null}
+
+            {!isMobileLayout || contactsFiltersOpen ? (
+              <div className="admin-historyControlsRow admin-historyControlsRow--spaced">
+                <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
+                  <span className="admin-searchField__icon" aria-hidden="true">
+                    <SearchIcon />
+                  </span>
+                  <input
+                    value={contactsQ}
+                    onChange={(e) => setContactsQ(e.target.value)}
+                    placeholder="Pesquisar usuário, nome, e-mail, empresa ou setor"
+                    className="admin-searchField__input"
+                  />
+                </div>
+
+                <select
+                  className="admin-historyFilterSelect"
+                  value={companyId}
+                  onChange={(e) => {
+                    setCompanyId(e.target.value);
+                    setDepartmentId("");
+                  }}
+                  style={inputStyle({ minWidth: 180 })}
+                >
+                  <option value="">Todas as empresas</option>
+                  {companyOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  className="admin-historyFilterSelect"
+                  value={departmentId}
+                  onChange={(e) => setDepartmentId(e.target.value)}
+                  style={inputStyle({ minWidth: 180 })}
+                >
+                  <option value="">Todos os setores</option>
+                  {departmentOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
 
             {contactsMsg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{contactsMsg}</div> : null}
 
-            <div style={{ display: "grid", gap: 10 }}>
+            <div className="admin-historyContactsList">
+              {!isMobileLayout ? (
+                <div className="admin-historyContactsHead" aria-hidden="true">
+                  <span>Foto</span>
+                  <span>Nome / User</span>
+                  <span>Empresa / Setor</span>
+                  <span>E-mail / Ramal</span>
+                  <span>Criado</span>
+                  <span>Último login</span>
+                </div>
+              ) : null}
+
               {contactsLoading ? (
-                <div style={{ color: "var(--muted)" }}>Carregando…</div>
+                <div className="admin-historyEmpty">Carregando…</div>
               ) : filteredContacts.length === 0 ? (
-                <div style={{ color: "var(--muted)" }}>Nenhum contato encontrado.</div>
+                <div className="admin-historyEmpty">Nenhum contato encontrado.</div>
               ) : (
                 filteredContacts.map((u) => (
                   <button
                     key={u.id}
                     onClick={() => openUser(u)}
-                    style={{
-                      textAlign: "left",
-                      padding: 12,
-                      borderRadius: 16,
-                      border: "1px solid var(--border)",
-                      background: "var(--card-bg)",
-                      boxShadow: "var(--shadow)",
-                      cursor: "pointer",
-                      color: "var(--fg)",
-                    }}
+                    className={`admin-historyContactCard ${isMobileLayout ? "admin-historyContactCard--mobile" : ""}`}
                   >
-                    <div style={{ fontWeight: 900 }}>{u.name}</div>
-                    <div style={{ fontSize: 12, color: "var(--muted)" }}>@{u.username}</div>
+                    {(() => {
+                      const avatar = contactAvatarUrl(u.avatarUrl);
+                      const fallback = (u.name || u.username).slice(0, 1).toUpperCase();
+                      const company = u.company?.name ?? "Sem empresa";
+                      const department = u.department?.name ?? "Sem setor";
+                      const email = u.email || "Sem e-mail";
+                      const ramal = u.extension || "—";
+                      const created = u.createdAt ? fmt(u.createdAt) : "—";
+                      const isOnlineNow = onlineUserIds.has(u.id);
+                      const lastLogin = u.lastLoginAt ? fmt(u.lastLoginAt) : "—";
+
+                      if (isMobileLayout) {
+                        return (
+                          <>
+                            <div className="admin-historyContactCard__mobileTop">
+                              <div className="admin-historyContactCard__mobileLines">
+                                <div className="admin-historyContactLine">
+                                  <span className="admin-historyContactLine__label">Nome:</span>
+                                  <span className="admin-historyContactLine__value">{u.name}</span>
+                                </div>
+                                <div className="admin-historyContactLine">
+                                  <span className="admin-historyContactLine__label">Username:</span>
+                                  <span className="admin-historyContactLine__value">@{u.username}</span>
+                                </div>
+                              </div>
+                              <div className="admin-historyContactCard__avatar admin-historyContactCard__avatar--mobile">
+                                {avatar ? <img src={avatar} alt={u.name} /> : fallback}
+                              </div>
+                            </div>
+                            <div className="admin-historyContactCard__mobileMeta">
+                              {company} • {department}
+                            </div>
+                            <div className="admin-historyContactLine">
+                              <span className="admin-historyContactLine__label">E-mail:</span>
+                              <span className="admin-historyContactLine__value">{email}</span>
+                            </div>
+                            <div className="admin-historyContactLine">
+                              <span className="admin-historyContactLine__label">Ramal:</span>
+                              <span className="admin-historyContactLine__value">{ramal}</span>
+                            </div>
+                            <div className="admin-historyContactLine">
+                              <span className="admin-historyContactLine__label">Status:</span>
+                              <span className="admin-historyContactLine__value">
+                                {isOnlineNow ? <OnlineBadge /> : lastLogin}
+                              </span>
+                            </div>
+                          </>
+                        );
+                      }
+
+                      return (
+                        <>
+                          <div className="admin-historyContactCard__avatar">{avatar ? <img src={avatar} alt={u.name} /> : fallback}</div>
+                          <div className="admin-historyContactCard__identity">
+                            <div className="admin-historyContactCard__name">{u.name}</div>
+                            <div className="admin-historyContactCard__username">@{u.username}</div>
+                          </div>
+                          <div className="admin-historyContactCard__col">
+                            <div>{company}</div>
+                            <div className="admin-historyContactCard__small">{department}</div>
+                          </div>
+                          <div className="admin-historyContactCard__col">
+                            <div className="admin-historyContactCard__email">{email}</div>
+                            <div className="admin-historyContactCard__small">Ramal: {ramal}</div>
+                          </div>
+                          <div className="admin-historyContactCard__col admin-historyContactCard__date">{created}</div>
+                          <div className="admin-historyContactCard__col admin-historyContactCard__date">
+                            {isOnlineNow ? <OnlineBadge /> : lastLogin}
+                          </div>
+                        </>
+                      );
+                    })()}
                   </button>
                 ))
               )}
@@ -912,12 +1159,12 @@ export function AdminHistoryPage() {
           </Card>
         </div>
       ) : mode === "userConversations" ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+        <div className="admin-grid12">
           <Card
             title={`Chats de ${selectedUser?.name ?? ""}`}
             colSpan={12}
             right={
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div className="admin-historyCardRight">
                 <button
                   onClick={() => {
                     setMode("contacts");
@@ -941,26 +1188,17 @@ export function AdminHistoryPage() {
           >
             {userConvsMsg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{userConvsMsg}</div> : null}
 
-            <div style={{ display: "grid", gap: 10 }}>
+            <div className="admin-historyConvsList">
               {userConvsLoading ? (
-                <div style={{ color: "var(--muted)" }}>Carregando…</div>
+                <div className="admin-historyEmpty">Carregando…</div>
               ) : userConvs.length === 0 ? (
-                <div style={{ color: "var(--muted)" }}>Nenhuma conversa encontrada.</div>
+                <div className="admin-historyEmpty">Nenhuma conversa encontrada.</div>
               ) : (
                 userConvs.map((c) => (
                   <button
                     key={c.id}
                     onClick={() => openConversation(c)}
-                    style={{
-                      textAlign: "left",
-                      padding: 12,
-                      borderRadius: 16,
-                      border: "1px solid var(--border)",
-                      background: "var(--card-bg)",
-                      boxShadow: "var(--shadow)",
-                      cursor: "pointer",
-                      color: "var(--fg)",
-                    }}
+                    className="admin-historyConvCard"
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                       <div>
@@ -980,12 +1218,12 @@ export function AdminHistoryPage() {
           </Card>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+        <div className="admin-grid12">
           <Card
             title={`${selectedUser?.name ?? "Usuário"} ↔ ${selectedConv?.otherUser?.name ?? "Contato"}`}
             colSpan={12}
             right={
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div className="admin-historyCardRight">
                 <button
                   onClick={() => {
                     setMode("userConversations");
@@ -1233,7 +1471,7 @@ export function AdminHistoryPage() {
               ) : null}
             </div>
 
-            <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
+            <div className="admin-historyInfoText">
               Tempo real: {token ? "ativo" : "—"} (mensagens novas aparecem automaticamente quando a conversa está aberta)
             </div>
           </Card>
@@ -1257,6 +1495,7 @@ function Card({
 }) {
   return (
     <div
+      className="admin-card"
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,
@@ -1266,7 +1505,17 @@ function Card({
         boxShadow: "var(--shadow)",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 12,
+          rowGap: 8,
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginBottom: 10,
+        }}
+      >
         <div style={{ fontWeight: 900 }}>{title}</div>
         {right ? <div>{right}</div> : null}
       </div>

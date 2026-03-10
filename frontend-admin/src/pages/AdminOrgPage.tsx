@@ -30,8 +30,21 @@ export function AdminOrgPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editItem, setEditItem] = useState<OrgItem | null>(null);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => window.innerWidth <= 900);
+  const [filtersOpen, setFiltersOpen] = useState(() => window.innerWidth > 900);
 
   const basePath = tab === "companies" ? "/admin/org/companies" : "/admin/org/departments";
+
+  useEffect(() => {
+    const onResize = () => {
+      const nextMobile = window.innerWidth <= 900;
+      setIsMobileLayout(nextMobile);
+      if (!nextMobile) setFiltersOpen(true);
+    };
+
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -63,10 +76,10 @@ export function AdminOrgPage() {
   }, [loading, filtered.length]);
 
   return (
-    <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 56px" }}>
+    <div className="admin-page">
       <h1 style={{ margin: 0, marginBottom: 12 }}>Empresa / Setor</h1>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 12 }}>
+      <div className="admin-grid12">
         <Card title="Navegação" colSpan={12}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
             <button onClick={() => setTab("companies")} style={segBtn(tab === "companies")}>
@@ -82,8 +95,9 @@ export function AdminOrgPage() {
           title={tab === "companies" ? "Empresas" : "Setores"}
           colSpan={12}
           right={
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <div className="admin-orgCardRight">
               <button
+                className="admin-orgCreateBtn"
                 onClick={() => setCreateOpen(true)}
                 style={{
                   padding: "10px 12px",
@@ -101,84 +115,135 @@ export function AdminOrgPage() {
             </div>
           }
         >
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-            <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
-              <span className="admin-searchField__icon" aria-hidden="true">
-                <SearchIcon />
+          {isMobileLayout ? (
+            <button
+              className={`admin-filterToggleBtn ${filtersOpen ? "is-open" : ""}`}
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-expanded={filtersOpen}
+            >
+              <span className="admin-filterToggleBtn__icon" aria-hidden="true">
+                <FilterIcon />
               </span>
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder={tab === "companies" ? "Buscar empresa..." : "Buscar setor..."}
-                className="admin-searchField__input"
-              />
+              <span>Filtros</span>
+              <span className="admin-filterToggleBtn__state">{filtersOpen ? "Ocultar" : "Mostrar"}</span>
+            </button>
+          ) : null}
+
+          {!isMobileLayout || filtersOpen ? (
+            <div className="admin-orgFiltersRow">
+              <div className="admin-searchField" style={{ flex: 1, minWidth: 260 }}>
+                <span className="admin-searchField__icon" aria-hidden="true">
+                  <SearchIcon />
+                </span>
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder={tab === "companies" ? "Buscar empresa..." : "Buscar setor..."}
+                  className="admin-searchField__input"
+                />
+              </div>
             </div>
-          </div>
+          ) : null}
 
           {msg ? <div style={{ marginBottom: 10, color: "#ff8a8a", fontSize: 13 }}>{msg}</div> : null}
 
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720, tableLayout: "fixed" }}>
-              <colgroup>
-                <col />
-                <col style={{ width: 230 }} />
-                <col style={{ width: 150 }} />
-              </colgroup>
-              <thead>
-                <tr>
-                  <Th>Nome</Th>
-                  <Th style={{ textAlign: "center" }}>Criado</Th>
-                  <Th style={{ textAlign: "center" }}>Ações</Th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {loading ? (
+          {!isMobileLayout ? (
+            <div className="admin-orgTableWrap">
+              <table className="admin-orgTable">
+                <colgroup>
+                  <col style={{ width: "60%" }} />
+                  <col style={{ width: "24%" }} />
+                  <col style={{ width: "16%" }} />
+                </colgroup>
+                <thead>
                   <tr>
-                    <Td colSpan={3} style={{ color: "var(--muted)", padding: 14 }}>
-                      Carregando…
-                    </Td>
+                    <Th className="admin-orgTh">Nome</Th>
+                    <Th className="admin-orgTh admin-orgTh--center">Criado</Th>
+                    <Th className="admin-orgTh admin-orgTh--center">Ações</Th>
                   </tr>
-                ) : filtered.length === 0 ? (
-                  <tr>
-                    <Td colSpan={3} style={{ color: "var(--muted)", padding: 14 }}>
-                      Nenhum item encontrado.
-                    </Td>
-                  </tr>
-                ) : (
-                  filtered.map((it) => (
-                    <tr key={it.id} style={{ borderTop: "1px solid var(--border)" }}>
-                      <Td style={{ fontWeight: 900 }}>{it.name}</Td>
-                      <Td style={{ color: "var(--muted)", textAlign: "center", whiteSpace: "nowrap" }}>
-                        {fmt(it.createdAt)}
-                      </Td>
+                </thead>
 
-                      <Td style={{ textAlign: "center" }}>
-                        <div style={{ display: "inline-flex", gap: 10, justifyContent: "center" }}>
-                          <IconButton title="Editar" onClick={() => setEditItem(it)} tone="neutral">
-                            <IconPencil />
-                          </IconButton>
-
-                          <IconButton
-                            title="Excluir"
-                            tone="danger"
-                            onClick={async () => {
-                              const ok = confirm(`Excluir "${it.name}"? Essa ação não pode ser desfeita.`);
-                              if (!ok) return;
-                              await api.delete(`${basePath}/${it.id}`);
-                              await load();
-                            }}
-                          >
-                            <IconTrash />
-                          </IconButton>
-                        </div>
+                <tbody>
+                  {loading ? (
+                    <tr>
+                      <Td colSpan={3} className="admin-orgTd admin-orgTd--empty">
+                        Carregando…
                       </Td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  ) : filtered.length === 0 ? (
+                    <tr>
+                      <Td colSpan={3} className="admin-orgTd admin-orgTd--empty">
+                        Nenhum item encontrado.
+                      </Td>
+                    </tr>
+                  ) : (
+                    filtered.map((it) => (
+                      <tr key={it.id} className="admin-orgRow">
+                        <Td className="admin-orgTd admin-orgTd--name">{it.name}</Td>
+                        <Td className="admin-orgTd admin-orgTd--center admin-orgTd--muted">
+                          {fmt(it.createdAt)}
+                        </Td>
+
+                        <Td className="admin-orgTd admin-orgTd--center">
+                          <div className="admin-orgActionGroup">
+                            <IconButton title="Editar" onClick={() => setEditItem(it)} tone="neutral">
+                              <IconPencil />
+                            </IconButton>
+
+                            <IconButton
+                              title="Excluir"
+                              tone="danger"
+                              onClick={async () => {
+                                const ok = confirm(`Excluir "${it.name}"? Essa ação não pode ser desfeita.`);
+                                if (!ok) return;
+                                await api.delete(`${basePath}/${it.id}`);
+                                await load();
+                              }}
+                            >
+                              <IconTrash />
+                            </IconButton>
+                          </div>
+                        </Td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="admin-orgMobileList">
+              {loading ? (
+                <div className="admin-orgMobileEmpty">Carregando…</div>
+              ) : filtered.length === 0 ? (
+                <div className="admin-orgMobileEmpty">Nenhum item encontrado.</div>
+              ) : (
+                filtered.map((it) => (
+                  <article key={it.id} className="admin-orgMobileCard">
+                    <div className="admin-orgMobileCard__name">{it.name}</div>
+                    <div className="admin-orgMobileCard__meta">Criado em {fmt(it.createdAt)}</div>
+                    <div className="admin-orgActionGroup">
+                      <IconButton title="Editar" onClick={() => setEditItem(it)} tone="neutral">
+                        <IconPencil />
+                      </IconButton>
+
+                      <IconButton
+                        title="Excluir"
+                        tone="danger"
+                        onClick={async () => {
+                          const ok = confirm(`Excluir "${it.name}"? Essa ação não pode ser desfeita.`);
+                          if (!ok) return;
+                          await api.delete(`${basePath}/${it.id}`);
+                          await load();
+                        }}
+                      >
+                        <IconTrash />
+                      </IconButton>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          )}
         </Card>
       </div>
 
@@ -226,6 +291,7 @@ function Card({
 }) {
   return (
     <div
+      className="admin-card"
       style={{
         gridColumn: `span ${colSpan}`,
         padding: 16,
@@ -477,6 +543,14 @@ function SearchIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
       <path d="m20 20-3.6-3.6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function FilterIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }

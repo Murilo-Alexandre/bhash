@@ -17,12 +17,14 @@ export function TopNav({
   rightSlot?: React.ReactNode;
 }) {
   return (
-    <div style={{ width: "min(1100px, 100%)", margin: "0 auto", padding: "18px 16px 0" }}>
+    <div style={{ width: "100%", margin: 0, padding: "18px 12px 0" }}>
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
+          flexWrap: "wrap",
+          rowGap: 10,
           gap: 12,
           padding: "12px 14px",
           borderRadius: 18,
@@ -57,7 +59,7 @@ export function TopNav({
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto", flexWrap: "wrap", justifyContent: "flex-end" }}>
           {rightSlot ? rightSlot : null}
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
         </div>
