@@ -2,10 +2,16 @@
 
 Objetivo: trocar dados da empresa em **um unico arquivo** e gerar tudo para servidor + cliente.
 
+Observacao importante:
+- `deploy/out/` e gerado localmente e **nao deve ser commitado**.
+- `deploy/tenant.env` e local da empresa e **nao deve ir para o Git**.
+
 ## 1) Preparar tenant
 
 1. Copie `deploy/tenant.env.example` para `deploy/tenant.env`.
+   - Para a Permetal, voce pode usar `deploy/tenant.permetal.example` como base.
 2. Ajuste somente os valores dessa empresa (IP, dominios, secrets, pasta de updates).
+   - Para o modo mais simples no Windows interno, deixe `UPDATES_HOST` igual ao `CHAT_HOST` ou em branco.
 3. Se quiser HTTPS apenas no chat, deixe `ADMIN_HTTPS_ENABLED=false`.
 4. Se quiser admin tambem em HTTPS, use `ADMIN_HTTPS_ENABLED=true` e preencha `ADMIN_HOST`.
 

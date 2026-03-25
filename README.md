@@ -213,18 +213,16 @@ npm run services:reload:proxy
 
 ```powershell
 cd C:\bhash
-npm run infra:up
-npm run setup:server
-npm run services:start
-npm run services:save
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-startup-task.ps1
+Copy-Item .\deploy\tenant.permetal.example .\deploy\tenant.env
+# editar secrets em .\deploy\tenant.env
+npm run deploy:server:up -- --tenant-file deploy/tenant.env
+C:\caddy\caddy.exe validate --config C:\caddy\Caddyfile --adapter caddyfile
+C:\caddy\caddy.exe start --config C:\caddy\Caddyfile --adapter caddyfile
+npm run server:startup:install
 ```
 
-Para startup da maquina (SYSTEM), usar PowerShell como administrador:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-startup-task.ps1 -ForceSystemStartup
-```
+O fluxo recomendado no Windows Server usa `deploy:server:up` + `server:startup:install`,
+com backend/chat/admin atras do proxy interno (`services:start:proxy`).
 
 ## Como o Auto Start Funciona
 

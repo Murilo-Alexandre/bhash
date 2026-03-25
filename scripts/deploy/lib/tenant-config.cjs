@@ -80,7 +80,7 @@ function buildTenantConfig(rawInput) {
   if (adminHttpsEnabled && !adminHost) {
     throw new Error("ADMIN_HTTPS_ENABLED=true exige ADMIN_HOST preenchido.");
   }
-  const updatesHost = required(raw, "UPDATES_HOST");
+  const updatesHost = String(raw.UPDATES_HOST || chatHost).trim() || chatHost;
   const updatesPathPrefix = normalizePrefix(raw.UPDATES_PATH_PREFIX || "/desktop/win");
   const updatesPublishDir = required(raw, "UPDATES_PUBLISH_DIR");
 
@@ -111,6 +111,8 @@ function buildTenantConfig(rawInput) {
   const viteApiBase = String(raw.VITE_API_BASE || "/api").trim();
   const viteWsPath = String(raw.VITE_WS_PATH || "/socket.io").trim();
   const desktopPublishDir = updatesPublishDir;
+  const sameHostForUpdates = updatesHost.toLowerCase() === chatHost.toLowerCase();
+  const clientSkipHosts = parseBoolean(raw.CLIENT_SKIP_HOSTS || "false", false);
 
   const runProxyMode = parseBoolean(raw.RUN_PROXY_MODE || "true", true);
 
@@ -141,6 +143,8 @@ function buildTenantConfig(rawInput) {
     updatesPathPrefix,
     updatesBaseUrl,
     updatesPublishDir,
+    sameHostForUpdates,
+    clientSkipHosts,
     chatUrl,
     adminUrl,
     databaseUrl,
@@ -217,6 +221,12 @@ function escapeCaddyPath(value) {
 function makeCaddyfile(config) {
   const prefix = config.updatesPathPrefix;
   const updatesRoot = escapeCaddyPath(config.updatesPublishDir);
+  const updatesHandle = `
+    handle_path ${prefix}/* {
+        root * ${updatesRoot}
+        file_server
+    }
+`;
   const adminBlock = config.adminHttpsEnabled
     ? `
 https://${config.adminHost} {
@@ -261,12 +271,15 @@ https://${config.chatHost} {
         reverse_proxy 127.0.0.1:3000
     }
 
+${config.sameHostForUpdates ? updatesHandle : ""}
     handle {
         reverse_proxy 127.0.0.1:5173
     }
 }
 ${adminBlock}
-
+${config.sameHostForUpdates
+    ? ""
+    : `
 https://${config.updatesHost} {
     encode zstd gzip
 
@@ -275,6 +288,7 @@ https://${config.updatesHost} {
         file_server
     }
 }
+`}
 `;
 }
 
@@ -377,6 +391,10 @@ ${adminServer}
 }
 
 function makeClientPostInstallCmd(config) {
+  const hostPairs = config.sameHostForUpdates
+    ? "@(@('%SERVER_IP%','%CHAT_HOST%'))"
+    : "@(@('%SERVER_IP%','%CHAT_HOST%'), @('%SERVER_IP%','%UPDATES_HOST%'))";
+
   return `@echo off
 setlocal EnableExtensions
 
@@ -390,7 +408,7 @@ set "SERVER_IP=${config.serverIp}"
 set "CHAT_HOST=${config.chatHost}"
 set "UPDATES_HOST=${config.updatesHost}"
 set "UPDATE_BASE=${config.updatesBaseUrl}"
-set "SKIP_HOSTS=0"
+set "SKIP_HOSTS=${config.clientSkipHosts ? "1" : "0"}"
 set "ALLOW_INSECURE_TLS=0"
 
 set "BOOTSTRAP_URL=%UPDATE_BASE%/tools/bootstrap-desktop-new-pc.ps1"
@@ -408,7 +426,7 @@ echo [1/4] Configurando hosts necessarios...
 if "%SKIP_HOSTS%"=="1" (
   echo [AVISO] SKIP_HOSTS=1, pulando alteracao no arquivo hosts.
 ) else (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $hosts = Join-Path $env:WINDIR 'System32\\drivers\\etc\\hosts'; $pairs = @(@('%SERVER_IP%','%CHAT_HOST%'), @('%SERVER_IP%','%UPDATES_HOST%')); $lines = Get-Content $hosts -ErrorAction Stop; foreach ($p in $pairs) { $ip = $p[0]; $h = $p[1]; $esc = [regex]::Escape($h); $lines = $lines | Where-Object { $_ -notmatch ('^\\s*\\d{1,3}(\\.\\d{1,3}){3}\\s+' + $esc + '(\\s|$)') }; $lines += ($ip + ' ' + $h) }; Set-Content -Path $hosts -Value $lines -Encoding ASCII; Write-Host '[OK] Hosts atualizado (chat + updates).'; exit 0 } catch { Write-Host '[ERRO] Falha ao atualizar hosts: ' + $_.Exception.Message; exit 1 }"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $hosts = Join-Path $env:WINDIR 'System32\\drivers\\etc\\hosts'; $pairs = ${hostPairs}; $lines = Get-Content $hosts -ErrorAction Stop; foreach ($p in $pairs) { $ip = $p[0]; $h = $p[1]; $esc = [regex]::Escape($h); $lines = $lines | Where-Object { $_ -notmatch ('^\\s*\\d{1,3}(\\.\\d{1,3}){3}\\s+' + $esc + '(\\s|$)') }; $lines += ($ip + ' ' + $h) }; Set-Content -Path $hosts -Value $lines -Encoding ASCII; Write-Host '[OK] Hosts atualizado.'; exit 0 } catch { Write-Host '[ERRO] Falha ao atualizar hosts: ' + $_.Exception.Message; exit 1 }"
   if errorlevel 1 (
     echo [AVISO] Nao consegui alterar o hosts.
     echo [AVISO] Vou continuar; se falhar no download, configure DNS/hosts e rode novamente.
@@ -457,6 +475,7 @@ Fluxo no cliente:
 Resultado esperado:
 - task SYSTEM "BHash-Desktop-Machine-Updater" instalada
 - updates sem senha por usuario
+- host de update: ${config.updatesHost}
 - feed: ${config.updatesBaseUrl}
 `;
 }
@@ -473,6 +492,11 @@ URLs:
 - Chat: ${config.chatUrl}
 - Admin: ${config.adminUrl}
 - Admin HTTPS: ${config.adminHttpsEnabled ? "habilitado" : "desabilitado (admin interno)"}
+
+DNS interno recomendado:
+- ${config.chatHost} -> ${config.serverIp}
+${config.sameHostForUpdates ? "" : `- ${config.updatesHost} -> ${config.serverIp}
+`}
 
 Passos rapidos no servidor:
 1. Copiar .env para raiz do projeto.

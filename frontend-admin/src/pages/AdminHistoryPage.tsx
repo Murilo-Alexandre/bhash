@@ -2216,9 +2216,9 @@ export function AdminHistoryPage() {
                       <button
                         key={c.id}
                         onClick={() => openConversation(c)}
-                        className="admin-historyConvCard"
+                        className={`admin-historyUserChatRow ${isMobileLayout ? "admin-historyUserChatRow--mobile" : ""}`}
                       >
-                        <div className="admin-historyConvCard__avatar">
+                        <div className="admin-historyUserChatRow__avatar">
                           {showAvatar ? (
                             <img
                               src={avatar ?? ""}
@@ -2230,17 +2230,16 @@ export function AdminHistoryPage() {
                           )}
                         </div>
 
-                        <div className="admin-historyConvCard__main">
-                          <div className="admin-historyConvCard__top">
-                            <div className="admin-historyConvCard__identity">
-                              <div className="admin-historyConvCard__name">{c.otherUser.name}</div>
-                              <div className="admin-historyConvCard__username">@{c.otherUser.username}</div>
-                            </div>
-                            <div className="admin-historyConvCard__time">{fmt(previewDate)}</div>
-                          </div>
-
-                          <div className="admin-historyConvCard__preview">{previewText}</div>
+                        <div className="admin-historyUserChatRow__identity">
+                          <div className="admin-historyUserChatRow__name">{c.otherUser.name}</div>
+                          <div className="admin-historyUserChatRow__username">@{c.otherUser.username}</div>
                         </div>
+
+                        <div className="admin-historyUserChatRow__preview">
+                          {previewText}
+                        </div>
+
+                        <div className="admin-historyUserChatRow__time">{fmt(previewDate)}</div>
                       </button>
                     );
                   })()
@@ -2424,7 +2423,9 @@ export function AdminHistoryPage() {
                                     muted
                                     playsInline
                                   />
-                                  <span className="admin-historyVideoPreview__badge">Vídeo</span>
+                                  <span className="admin-historyVideoPreview__play" aria-hidden="true">
+                                    <PlayOverlayIcon />
+                                  </span>
                                 </div>
                               ) : (
                                 <img
@@ -2678,7 +2679,9 @@ export function AdminHistoryPage() {
                                   muted
                                   playsInline
                                 />
-                                <span className="admin-historyVideoPreview__badge">Vídeo</span>
+                                <span className="admin-historyVideoPreview__play" aria-hidden="true">
+                                  <PlayOverlayIcon />
+                                </span>
                               </div>
                             ) : (
                               <img src={imageUrl ?? ""} alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"} />
@@ -2858,7 +2861,9 @@ export function AdminHistoryPage() {
                                 muted
                                 playsInline
                               />
-                              <span className="admin-historyVideoPreview__badge">Vídeo</span>
+                              <span className="admin-historyVideoPreview__play" aria-hidden="true">
+                                <PlayOverlayIcon />
+                              </span>
                             </div>
                           ) : (
                             <img src={imageUrl ?? ""} alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"} />
@@ -3098,6 +3103,7 @@ export function AdminHistoryPage() {
                       src={currentViewerUrl}
                       className="admin-historyImageViewer__video"
                       controls
+                      autoPlay
                       playsInline
                       preload="metadata"
                     />
@@ -3241,6 +3247,14 @@ function DownloadIcon() {
       <path d="M12 4v10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       <path d="m8 11 4 4 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M5 19h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function PlayOverlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M9 7.5v9l7-4.5-7-4.5Z" fill="currentColor" />
     </svg>
   );
 }

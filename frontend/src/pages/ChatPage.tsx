@@ -799,6 +799,14 @@ function DownloadIcon() {
   );
 }
 
+function PlayOverlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M9 7.5v9l7-4.5-7-4.5Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function ArrowUpIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -2882,7 +2890,9 @@ export function ChatPage() {
                                       muted
                                       playsInline
                                     />
-                                    <span className="chat-videoPreview__badge">Vídeo</span>
+                                    <span className="chat-videoPreview__play" aria-hidden="true">
+                                      <PlayOverlayIcon />
+                                    </span>
                                   </div>
                                 ) : (
                                   <img
@@ -3614,6 +3624,7 @@ export function ChatPage() {
                     src={currentViewerUrl}
                     className="chat-imageViewer__video"
                     controls
+                    autoPlay
                     playsInline
                     preload="metadata"
                   />
@@ -3781,7 +3792,9 @@ export function ChatPage() {
                               muted
                               playsInline
                             />
-                            <span className="chat-videoPreview__badge">Vídeo</span>
+                            <span className="chat-videoPreview__play" aria-hidden="true">
+                              <PlayOverlayIcon />
+                            </span>
                           </div>
                         ) : (
                           <img
