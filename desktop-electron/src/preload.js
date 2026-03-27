@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("bhashDesktop", {
   openSettings: () => ipcRenderer.invoke("desktop:open-settings"),
   setAutoStart: (enabled) => ipcRenderer.invoke("desktop:set-auto-start", enabled),
   notify: (payload) => ipcRenderer.invoke("desktop:notify", payload),
+  downloadFile: (payload) => ipcRenderer.invoke("desktop:download-file", payload),
   consumeNotificationTarget: () => ipcRenderer.invoke("desktop:consume-notification-target"),
   checkUpdates: () => ipcRenderer.invoke("desktop:check-updates"),
   onUpdateStatus: (callback) => subscribe("desktop:update-status", callback),

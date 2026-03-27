@@ -1,6 +1,7 @@
 const MOJIBAKE_MARKERS = /[ÃÂ�]/u;
 const IMAGE_NAME_RE = /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i;
 const VIDEO_NAME_RE = /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i;
+const AUDIO_NAME_RE = /\.(mp3|m4a|aac|wav|flac|oga|ogg|opus|weba|amr|mpga)([?#]|$)/i;
 
 function mojibakeScore(value: string) {
   let score = 0;
@@ -84,4 +85,24 @@ export function isLikelyMediaFile(input?: {
   attachmentUrl?: string | null;
 }) {
   return isLikelyImageFile(input) || isLikelyVideoFile(input);
+}
+
+export function isLikelyAudioFile(input?: {
+  mimetype?: string | null;
+  originalname?: string | null;
+  filename?: string | null;
+  attachmentName?: string | null;
+  attachmentUrl?: string | null;
+}) {
+  const mime = String(input?.mimetype ?? '').toLowerCase();
+  if (mime.startsWith('audio/')) return true;
+
+  const hints = [
+    input?.originalname,
+    input?.filename,
+    input?.attachmentName,
+    input?.attachmentUrl,
+  ];
+
+  return hints.some((hint) => AUDIO_NAME_RE.test(normalizeFileHint(hint)));
 }

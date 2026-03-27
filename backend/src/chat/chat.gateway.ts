@@ -163,20 +163,30 @@ export class ChatGateway implements OnGatewayInit, OnGatewayDisconnect {
     const body = (data.body ?? '').trim();
     if (!body) return { ok: false, reason: 'empty body' };
 
-    const msg = await this.messages.send({
+    const result = await this.messages.send({
       userId,
       conversationId: data.conversationId,
       body,
       replyToId: data.replyToId ?? null,
     });
 
-    this.events.emitMessageNew(data.conversationId, msg);
-    const participantIds = await this.messages.getConversationParticipantIds(data.conversationId);
-    for (const participantId of participantIds) {
-      this.events.emitUserMessageNew(participantId, msg);
-      this.events.emitConversationsSync(participantId, { conversationId: data.conversationId });
+    for (const delivery of result.deliveries) {
+      if (delivery.emitToConversationRoom !== false) {
+        this.events.emitMessageNew(delivery.conversationId, delivery.message);
+      }
+      const notifyUserIds = delivery.notifyUserIds?.length ? delivery.notifyUserIds : delivery.participantIds;
+      const syncUserIds = delivery.syncUserIds?.length ? delivery.syncUserIds : notifyUserIds;
+      for (const participantId of notifyUserIds) {
+        this.events.emitUserMessageNew(participantId, delivery.message);
+      }
+      for (const participantId of syncUserIds) {
+        this.events.emitConversationsSync(participantId, {
+          conversationId: delivery.conversationId,
+        });
+      }
     }
 
-    return { ok: true, id: msg.id };
+    return { ok: true, id: result.message.id };
   }
 }
+

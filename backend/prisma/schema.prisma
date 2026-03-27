@@ -10,6 +10,13 @@ enum MessageContentType {
   TEXT
   IMAGE
   FILE
+  AUDIO
+}
+
+enum ConversationKind {
+  DIRECT
+  GROUP
+  BROADCAST
 }
 
 enum MediaRetentionInterval {
@@ -27,7 +34,8 @@ model Company {
   name      String   @unique
   createdAt DateTime @default(now())
 
-  users User[]
+  users                   User[]
+  conversationBroadcasts  ConversationBroadcastCompany[]
 
   @@map("companies")
 }
@@ -37,7 +45,8 @@ model Department {
   name      String   @unique
   createdAt DateTime @default(now())
 
-  users User[]
+  users                   User[]
+  conversationBroadcasts  ConversationBroadcastDepartment[]
 
   @@map("departments")
 }
@@ -65,6 +74,10 @@ model User {
 
   conversationsA     Conversation[]   @relation("ConversationUserA")
   conversationsB     Conversation[]   @relation("ConversationUserB")
+  createdConversations Conversation[] @relation("ConversationCreator")
+  conversationParticipants ConversationParticipant[] @relation("ConversationParticipantUser")
+  broadcastTargets   ConversationBroadcastTarget[] @relation("ConversationBroadcastTargetUser")
+  broadcastExcludedFrom ConversationBroadcastExcludedUser[] @relation("ConversationBroadcastExcludedUser")
   sentMessages       Message[]        @relation("MessageSender")
   conversationStates ConversationUserState[]
   messageVisibility  MessageVisibility[]
@@ -117,18 +130,103 @@ model Conversation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  userAId   String
-  userBId   String
+  kind        ConversationKind @default(DIRECT)
+  title       String?
+  avatarUrl   String?
+  createdById String?
+  userAId     String?
+  userBId     String?
+  broadcastIncludeAllUsers Boolean @default(false)
 
-  userA     User @relation("ConversationUserA", fields: [userAId], references: [id])
-  userB     User @relation("ConversationUserB", fields: [userBId], references: [id])
+  createdBy User? @relation("ConversationCreator", fields: [createdById], references: [id])
+  userA     User? @relation("ConversationUserA", fields: [userAId], references: [id])
+  userB     User? @relation("ConversationUserB", fields: [userBId], references: [id])
 
-  messages  Message[]
-  states    ConversationUserState[]
+  participants     ConversationParticipant[]
+  broadcastTargets ConversationBroadcastTarget[]
+  broadcastCompanyTargets ConversationBroadcastCompany[]
+  broadcastDepartmentTargets ConversationBroadcastDepartment[]
+  broadcastExcludedUsers ConversationBroadcastExcludedUser[]
+  broadcastMessages Message[] @relation("MessageBroadcastSource")
+  messages         Message[]
+  states           ConversationUserState[]
 
   @@unique([userAId, userBId])
+  @@index([kind])
+  @@index([createdById])
   @@index([updatedAt])
   @@map("conversations")
+}
+
+model ConversationParticipant {
+  id             String   @id @default(uuid())
+  conversationId String
+  userId         String
+  addedById      String?
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation("ConversationParticipantUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_participants")
+}
+
+model ConversationBroadcastTarget {
+  id             String   @id @default(uuid())
+  conversationId String
+  userId         String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation("ConversationBroadcastTargetUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_broadcast_targets")
+}
+
+model ConversationBroadcastCompany {
+  id             String   @id @default(uuid())
+  conversationId String
+  companyId      String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  company      Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, companyId])
+  @@index([companyId])
+  @@map("conversation_broadcast_companies")
+}
+
+model ConversationBroadcastDepartment {
+  id             String   @id @default(uuid())
+  conversationId String
+  departmentId   String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  department   Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, departmentId])
+  @@index([departmentId])
+  @@map("conversation_broadcast_departments")
+}
+
+model ConversationBroadcastExcludedUser {
+  id             String   @id @default(uuid())
+  conversationId String
+  userId         String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation("ConversationBroadcastExcludedUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_broadcast_excluded_users")
 }
 
 model Message {
@@ -148,9 +246,12 @@ model Message {
 
   replyToId      String?
   deletedAt      DateTime?
+  broadcastListId String?
+  broadcastListTitle String?
 
   conversation   Conversation       @relation(fields: [conversationId], references: [id])
   sender         User               @relation("MessageSender", fields: [senderId], references: [id])
+  broadcastList  Conversation?      @relation("MessageBroadcastSource", fields: [broadcastListId], references: [id])
 
   replyTo        Message?           @relation("MessageReply", fields: [replyToId], references: [id])
   replies        Message[]          @relation("MessageReply")
@@ -160,6 +261,7 @@ model Message {
   hiddenForUsers MessageVisibility[]
 
   @@index([conversationId, createdAt])
+  @@index([broadcastListId])
   @@index([replyToId])
   @@index([senderId])
   @@map("messages")
@@ -173,6 +275,7 @@ model ConversationUserState {
   pinned         Boolean  @default(false)
   clearedAt      DateTime?
   lastReadAt     DateTime?
+  leftAt         DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -182,6 +285,7 @@ model ConversationUserState {
   @@unique([conversationId, userId])
   @@index([userId, hidden])
   @@index([userId, pinned])
+  @@index([userId, leftAt])
   @@map("conversation_user_states")
 }
 

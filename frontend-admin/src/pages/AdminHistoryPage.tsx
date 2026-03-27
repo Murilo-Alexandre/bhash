@@ -1,8 +1,31 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import { useAdminAuth } from "../adminAuth";
-import { API_BASE } from "../api";
 import { createAdminSocket } from "../socket";
+import {
+  AttachmentKindIcon,
+  AudioMessagePlayer,
+  PresentationPreview,
+  SpreadsheetPreview,
+  TextDocumentPreview,
+  attachmentDownloadName,
+  attachmentTypeLabel,
+  buildPdfPreviewUrl,
+  isAudioMessageAttachment,
+  isImageDocumentPreview,
+  isMediaAttachment,
+  isPdfAttachment,
+  isPresentationAttachment,
+  isSpreadsheetAttachment,
+  isTextDocumentAttachment,
+  isVideoAttachment,
+  isVideoDocumentPreview,
+  messagePreviewText,
+  normalizeAttachmentDisplayName,
+  replyPreviewText,
+  stripAttachmentRemovalNotice,
+  toAbsoluteUrl,
+} from "../components/chatAttachmentPreviews";
 
 /** ============================
  *  Types
@@ -35,19 +58,42 @@ type ConversationItem = {
     | null;
 };
 
+type ReplyToMessage = {
+  id: string;
+  body?: string | null;
+  contentType?: "TEXT" | "IMAGE" | "FILE" | "AUDIO";
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+  sender?: {
+    id: string;
+    username: string;
+    name: string;
+    avatarUrl?: string | null;
+  } | null;
+};
+
+type BroadcastSource = {
+  id: string;
+  title: string;
+};
+
 type Message = {
   id: string;
   createdAt: string;
   conversationId: string;
   senderId: string;
   body: string | null;
-  contentType?: "TEXT" | "IMAGE" | "FILE";
+  contentType?: "TEXT" | "IMAGE" | "FILE" | "AUDIO";
   attachmentUrl?: string | null;
   attachmentName?: string | null;
   attachmentMime?: string | null;
   attachmentSize?: number | null;
+  replyToId?: string | null;
   deletedAt?: string | null;
+  broadcastSource?: BroadcastSource | null;
   sender: { id: string; username: string; name: string } | null;
+  replyTo?: ReplyToMessage | null;
 };
 
 type PagedContacts = {
@@ -233,29 +279,6 @@ function contactAvatarUrl(raw?: string | null) {
   return toAbsoluteUrl(raw);
 }
 
-function toAbsoluteUrl(raw?: string | null) {
-  if (!raw) return null;
-  if (raw.startsWith("data:") || raw.startsWith("blob:")) return raw;
-  if (/^(https?:)?\/\//i.test(raw)) {
-    try {
-      const resolved = new URL(raw, typeof window !== "undefined" ? window.location.origin : "http://localhost");
-      const isLoopbackHost = /^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|::1|\[::1\])$/i.test(
-        resolved.hostname
-      );
-      if (!isLoopbackHost) return resolved.toString();
-
-      const apiResolved = new URL(
-        API_BASE,
-        typeof window !== "undefined" ? window.location.origin : "http://localhost:3000"
-      );
-      return `${apiResolved.origin}${resolved.pathname}${resolved.search}${resolved.hash}`;
-    } catch {
-      return raw;
-    }
-  }
-  return raw.startsWith("/") ? `${API_BASE}${raw}` : `${API_BASE}/${raw}`;
-}
-
 function formatBytes(bytes?: number | null) {
   if (!bytes || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -267,79 +290,6 @@ function formatBytes(bytes?: number | null) {
   }
   const precision = idx === 0 ? 0 : value < 10 ? 1 : 0;
   return `${value.toFixed(precision)} ${units[idx]}`;
-}
-
-const ATTACHMENT_MOJIBAKE_MARKERS = /[ÃÂ�]/u;
-
-function attachmentMojibakeScore(value: string) {
-  let score = 0;
-  for (const char of value) {
-    if (char === "�") score += 4;
-    if (char === "Ã" || char === "Â") score += 2;
-  }
-  return score;
-}
-
-function decodeLatin1AsUtf8(value: string) {
-  if (typeof TextDecoder === "undefined") return value;
-  const bytes = Uint8Array.from([...value].map((char) => char.charCodeAt(0) & 0xff));
-  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-}
-
-function normalizeAttachmentDisplayName(value?: string | null) {
-  const raw = String(value ?? "").replace(/\0/g, "").trim();
-  if (!raw) return "";
-
-  const normalized = raw.normalize("NFC");
-  if (!ATTACHMENT_MOJIBAKE_MARKERS.test(normalized)) return normalized;
-
-  try {
-    const decoded = decodeLatin1AsUtf8(normalized).replace(/\0/g, "").trim().normalize("NFC");
-    if (!decoded) return normalized;
-    return attachmentMojibakeScore(decoded) < attachmentMojibakeScore(normalized) ? decoded : normalized;
-  } catch {
-    return normalized;
-  }
-}
-
-function isPdfAttachment(message: Partial<Message>) {
-  const mime = String(message.attachmentMime ?? "").toLowerCase();
-  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
-  const url = String(message.attachmentUrl ?? "").toLowerCase();
-  return mime.includes("pdf") || name.endsWith(".pdf") || url.includes(".pdf");
-}
-
-function isImageAttachment(message: Partial<Message>) {
-  const mime = String(message.attachmentMime ?? "").toLowerCase();
-  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
-  const url = String(message.attachmentUrl ?? "").toLowerCase();
-  return message.contentType === "IMAGE" || mime.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i.test(name) || /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i.test(url);
-}
-
-function isVideoAttachment(message: Partial<Message>) {
-  const mime = String(message.attachmentMime ?? "").toLowerCase();
-  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
-  const url = String(message.attachmentUrl ?? "").toLowerCase();
-  return mime.startsWith('video/') || /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i.test(name) || /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i.test(url);
-}
-
-function isMediaAttachment(message: Partial<Message>) {
-  return isVideoAttachment(message) || isImageAttachment(message);
-}
-
-function buildPdfPreviewUrl(raw?: string | null) {
-  const absolute = toAbsoluteUrl(raw);
-  if (!absolute) return null;
-  const [base] = absolute.split("#");
-  return `${base}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`;
-}
-
-function attachmentDownloadName(message: Partial<Message>) {
-  const normalized = normalizeAttachmentDisplayName(message.attachmentName);
-  if (normalized) return normalized;
-  if (isVideoAttachment(message)) return "video";
-  if (isImageAttachment(message)) return "imagem";
-  return "arquivo";
 }
 
 async function triggerBrowserDownload(url: string, filename: string) {
@@ -408,38 +358,16 @@ function normalizeIntervalCountInput(value: string) {
 
 function messageSearchableText(msg: Partial<Message>) {
   const kind =
-    isMediaAttachment(msg)
+    isAudioMessageAttachment(msg)
+      ? "audio áudio"
+      : isMediaAttachment(msg)
       ? isVideoAttachment(msg)
         ? "video"
         : "imagem"
-      : msg.contentType === "FILE"
+      : msg.contentType === "FILE" || msg.contentType === "AUDIO"
       ? "arquivo"
       : "";
   return [msg.body ?? "", normalizeAttachmentDisplayName(msg.attachmentName), kind].join(" ").trim();
-}
-
-function messagePreviewText(msg: Partial<Message>) {
-  const body = (msg.body ?? "").trim();
-  if (body) return body;
-  if (isMediaAttachment(msg)) return isVideoAttachment(msg) ? "Vídeo" : "Imagem";
-  const attachmentName = normalizeAttachmentDisplayName(msg.attachmentName);
-  if (msg.contentType === "FILE") return attachmentName ? `Arquivo: ${attachmentName}` : "Arquivo";
-  return "";
-}
-
-const REMOVED_ATTACHMENT_NOTICE_GENERIC =
-  "Esta imagem ou documento foi apagado pelo administrador segundo a política de backup de arquivos.";
-const REMOVED_ATTACHMENT_NOTICE_IMAGE =
-  "Essa imagem foi apagada pelo administrador segundo a política de backup de arquivos.";
-const REMOVED_ATTACHMENT_NOTICE_FILE =
-  "Esse documento foi apagado pelo administrador segundo a política de backup de arquivos.";
-
-function stripAttachmentRemovalNotice(value?: string | null) {
-  let text = (value ?? "").trim();
-  text = text.replace(REMOVED_ATTACHMENT_NOTICE_IMAGE, "");
-  text = text.replace(REMOVED_ATTACHMENT_NOTICE_FILE, "");
-  text = text.replace(REMOVED_ATTACHMENT_NOTICE_GENERIC, "");
-  return text.trim();
 }
 
 function FilterIcon() {
@@ -538,8 +466,6 @@ export function AdminHistoryPage() {
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaMsg, setMediaMsg] = useState<string | null>(null);
   const [removingAttachmentId, setRemovingAttachmentId] = useState<string | null>(null);
-  const [mediaTab, setMediaTab] = useState<"image" | "file">("image");
-  const [mediaPreviewSlots, setMediaPreviewSlots] = useState(6);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [mediaLibraryTab, setMediaLibraryTab] = useState<"image" | "file">("image");
   const [newMsgsCount, setNewMsgsCount] = useState(0);
@@ -574,7 +500,6 @@ export function AdminHistoryPage() {
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
-  const mediaPreviewHostRef = useRef<HTMLDivElement | null>(null);
   const imageViewerDragRef = useRef<{
     active: boolean;
     startX: number;
@@ -1274,6 +1199,198 @@ export function AdminHistoryPage() {
     }
   }
 
+  function renderDocumentPreviewCard(item: Message, opts?: { showPreviewMeta?: boolean; downloadButton?: boolean }) {
+    const fileUrl = toAbsoluteUrl(item.attachmentUrl);
+    if (!fileUrl) return null;
+
+    const pdfPreviewUrl = isPdfAttachment(item) ? buildPdfPreviewUrl(item.attachmentUrl) : null;
+    const spreadsheetPreviewUrl = isSpreadsheetAttachment(item) ? fileUrl : null;
+    const textDocumentPreviewUrl = isTextDocumentAttachment(item) ? fileUrl : null;
+    const presentationPreviewUrl = isPresentationAttachment(item) ? fileUrl : null;
+    const imageDocumentPreviewUrl = item.contentType === "FILE" && isImageDocumentPreview(item) ? fileUrl : null;
+    const videoDocumentPreviewUrl = item.contentType === "FILE" && isVideoDocumentPreview(item) ? fileUrl : null;
+    const previewMeta = (() => {
+      try {
+        return new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch {
+        return "";
+      }
+    })();
+
+    return (
+      <div
+        className={`chat-fileCard ${
+          pdfPreviewUrl
+            ? "chat-fileCard--pdf"
+            : spreadsheetPreviewUrl
+            ? "chat-fileCard--sheet"
+            : textDocumentPreviewUrl
+            ? "chat-fileCard--textDoc"
+            : presentationPreviewUrl
+            ? "chat-fileCard--presentation"
+            : imageDocumentPreviewUrl || videoDocumentPreviewUrl
+            ? "chat-fileCard--imagePreview"
+            : ""
+        }`}
+      >
+        {pdfPreviewUrl ? (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview" aria-hidden="true">
+              <iframe
+                src={pdfPreviewUrl}
+                title={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do PDF"}
+                loading="lazy"
+                tabIndex={-1}
+              />
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        ) : spreadsheetPreviewUrl ? (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview chat-fileCard__preview--sheet" aria-hidden="true">
+              <SpreadsheetPreview
+                attachmentUrl={item.attachmentUrl}
+                attachmentName={item.attachmentName}
+                attachmentMime={item.attachmentMime}
+              />
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        ) : textDocumentPreviewUrl ? (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview chat-fileCard__preview--textDoc" aria-hidden="true">
+              <TextDocumentPreview
+                attachmentUrl={item.attachmentUrl}
+                attachmentName={item.attachmentName}
+                attachmentMime={item.attachmentMime}
+              />
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        ) : presentationPreviewUrl ? (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview chat-fileCard__preview--presentation" aria-hidden="true">
+              <PresentationPreview
+                attachmentUrl={item.attachmentUrl}
+                attachmentName={item.attachmentName}
+                attachmentMime={item.attachmentMime}
+              />
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        ) : imageDocumentPreviewUrl ? (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview chat-fileCard__preview--imageDoc" aria-hidden="true">
+              <img
+                src={imageDocumentPreviewUrl}
+                alt={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do documento"}
+                className="chat-fileCard__previewMedia chat-fileCard__previewMedia--contain"
+                loading="lazy"
+                decoding="async"
+              />
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        ) : videoDocumentPreviewUrl ? (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview chat-fileCard__preview--imageDoc" aria-hidden="true">
+              <div className="chat-videoPreview">
+                <video
+                  src={videoDocumentPreviewUrl}
+                  className="chat-fileCard__previewMedia chat-fileCard__previewMedia--contain"
+                  preload="metadata"
+                  muted
+                  playsInline
+                />
+                <span className="chat-videoPreview__play" aria-hidden="true">
+                  <PlayOverlayIcon />
+                </span>
+              </div>
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        ) : (
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__previewLink">
+            <div className="chat-fileCard__preview chat-fileCard__preview--fallback" aria-hidden="true">
+              <div className="chat-fileCard__previewFallback">
+                <div className="chat-fileCard__previewFallbackIcon">
+                  <AttachmentKindIcon message={item} />
+                </div>
+                <span className="chat-fileCard__previewFallbackText">Previa indisponivel</span>
+              </div>
+              {opts?.showPreviewMeta ? (
+                <div className="chat-fileCard__previewMeta">
+                  <span>{previewMeta}</span>
+                </div>
+              ) : null}
+            </div>
+          </a>
+        )}
+        <div className="chat-fileCard__body">
+          <a href={fileUrl} target="_blank" rel="noreferrer" className="chat-fileCard__mainLink">
+            <div className="chat-fileCard__icon">
+              <AttachmentKindIcon message={item} />
+            </div>
+            <div className="chat-fileCard__text">
+              <div className="chat-fileCard__name">{normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}</div>
+              <div className="chat-fileCard__meta">
+                {attachmentTypeLabel(item)}
+                {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
+              </div>
+            </div>
+          </a>
+          {opts?.downloadButton ? (
+            <button
+              type="button"
+              className="chat-fileCard__downloadBtn"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void downloadAttachment(item);
+              }}
+              title="Baixar arquivo"
+              aria-label="Baixar arquivo"
+            >
+              <DownloadIcon />
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  function openConversationDetails(initialTab: "image" | "file" = "image") {
+    setMediaLibraryTab(initialTab);
+    setMediaLibraryOpen(true);
+    if (selectedConv?.id) {
+      void loadConversationMedia(selectedConv.id, { silent: true });
+    }
+  }
+
   async function openConversation(conv: ConversationItem) {
     setSelectedConv(conv);
     setMode("conversation");
@@ -1287,7 +1404,6 @@ export function AdminHistoryPage() {
 
     setHighlightTerm("");
     setPendingScrollToId(null);
-    setMediaTab("image");
     setMediaLibraryTab("image");
     setMediaLibraryOpen(false);
     setImageViewerOpen(false);
@@ -1322,7 +1438,6 @@ export function AdminHistoryPage() {
 
     setHighlightTerm(globalQ.trim());
     setPendingScrollToId(hit.id);
-    setMediaTab("image");
     setMediaLibraryTab("image");
     setMediaLibraryOpen(false);
     setNewMsgsCount(0);
@@ -1371,7 +1486,11 @@ export function AdminHistoryPage() {
         return [...prev, msg];
       });
 
-      if ((msg.contentType === "IMAGE" || msg.contentType === "FILE") && msg.attachmentUrl && !msg.deletedAt) {
+      if (
+        (msg.contentType === "IMAGE" || msg.contentType === "FILE" || msg.contentType === "AUDIO") &&
+        msg.attachmentUrl &&
+        !msg.deletedAt
+      ) {
         setMediaItems((prev) => {
           if (prev.some((m) => m.id === msg.id)) return prev;
           return [msg, ...prev];
@@ -1396,7 +1515,10 @@ export function AdminHistoryPage() {
       setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
       setChatSearchHits((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
       setMediaItems((prev) => {
-        const hasMedia = (msg.contentType === "IMAGE" || msg.contentType === "FILE") && !!msg.attachmentUrl && !msg.deletedAt;
+        const hasMedia =
+          (msg.contentType === "IMAGE" || msg.contentType === "FILE" || msg.contentType === "AUDIO") &&
+          !!msg.attachmentUrl &&
+          !msg.deletedAt;
         if (!hasMedia) return prev.filter((m) => m.id !== msg.id);
         return prev.some((m) => m.id === msg.id) ? prev.map((m) => (m.id === msg.id ? msg : m)) : [msg, ...prev];
       });
@@ -1569,7 +1691,6 @@ export function AdminHistoryPage() {
     setPendingScrollToId(null);
     setMediaItems([]);
     setMediaMsg(null);
-    setMediaTab("image");
     setMediaLibraryTab("image");
     setMediaLibraryOpen(false);
     setNewMsgsCount(0);
@@ -1611,7 +1732,7 @@ export function AdminHistoryPage() {
   const imageMediaItems = useMemo(
     () =>
       [...mediaItems]
-        .filter((item) => isMediaAttachment(item) && !!item.attachmentUrl)
+        .filter((item) => (isMediaAttachment(item) || isAudioMessageAttachment(item)) && !!item.attachmentUrl)
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [mediaItems]
   );
@@ -1619,31 +1740,10 @@ export function AdminHistoryPage() {
   const fileMediaItems = useMemo(
     () =>
       [...mediaItems]
-        .filter((item) => !isMediaAttachment(item) && item.contentType === "FILE" && !!item.attachmentUrl)
+        .filter((item) => item.contentType === "FILE" && !!item.attachmentUrl && !isAudioMessageAttachment(item))
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [mediaItems]
   );
-
-  const imagePreviewData = useMemo(() => {
-    const slotCount = Math.max(2, mediaPreviewSlots);
-    const hasMore = imageMediaItems.length > slotCount - 1;
-    const visibleCount = hasMore ? Math.max(slotCount - 1, 1) : Math.min(imageMediaItems.length, slotCount);
-    return {
-      hasMore,
-      items: imageMediaItems.slice(0, visibleCount),
-    };
-  }, [imageMediaItems, mediaPreviewSlots]);
-
-  const filePreviewData = useMemo(() => {
-    const slotCount = Math.max(2, mediaPreviewSlots);
-    const hasMore = fileMediaItems.length > slotCount - 1;
-    const visibleCount = hasMore ? Math.max(slotCount - 1, 1) : Math.min(fileMediaItems.length, slotCount);
-    return {
-      hasMore,
-      items: fileMediaItems.slice(0, visibleCount),
-    };
-  }, [fileMediaItems, mediaPreviewSlots]);
-  const mediaPreviewGridColumns = Math.max(2, mediaPreviewSlots);
 
   const mediaLibraryItems = mediaLibraryTab === "image" ? imageMediaItems : fileMediaItems;
 
@@ -1693,38 +1793,6 @@ export function AdminHistoryPage() {
       setImageViewerIndex(Math.max(0, imageViewerItems.length - 1));
     }
   }, [imageViewerIndex, imageViewerItems.length, imageViewerOpen]);
-
-  useEffect(() => {
-    if (mode !== "conversation") return;
-    const host = mediaPreviewHostRef.current;
-    if (!host) return;
-
-    const recompute = () => {
-      const width = host.clientWidth || 0;
-      if (!width) return;
-      const minCardWidth = mediaTab === "image" ? 158 : 220;
-      const gap = 10;
-      const floor = Math.floor((width + gap) / (minCardWidth + gap));
-      const minSlots = isMobileLayout ? 2 : 3;
-      const slots = Math.min(8, Math.max(minSlots, floor));
-      setMediaPreviewSlots(slots);
-    };
-
-    recompute();
-
-    let ro: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(() => recompute());
-      ro.observe(host);
-    } else {
-      window.addEventListener("resize", recompute);
-    }
-
-    return () => {
-      if (ro) ro.disconnect();
-      else window.removeEventListener("resize", recompute);
-    };
-  }, [mode, mediaTab, isMobileLayout]);
 
   // “scroll pra msg” (garantia extra)
   useEffect(() => {
@@ -2262,9 +2330,14 @@ export function AdminHistoryPage() {
               >
                 <SearchIcon />
               </button>
-              <div className="admin-historyConvTools__title">
+              <button
+                type="button"
+                className="admin-historyConvTools__title admin-historyConvTools__titleBtn"
+                onClick={() => openConversationDetails("image")}
+                title="Abrir dados e anexos da conversa"
+              >
                 {selectedUser?.name ?? "Usuário"} ↔ {selectedConv?.otherUser?.name ?? "Contato"}
-              </div>
+              </button>
               <button onClick={backToUserConversations} style={ghostBtn(false)}>
                 ← Voltar
               </button>
@@ -2368,9 +2441,22 @@ export function AdminHistoryPage() {
                     const m = row.m;
                     const isMe = selectedUser?.id ? m.senderId === selectedUser.id : false;
                     const mediaUrl = toAbsoluteUrl(m.attachmentUrl);
+                    const audioPlaybackUrl = isAudioMessageAttachment(m) ? mediaUrl : null;
+                    const hasAttachmentMediaPreview = !!(isMediaAttachment(m) && mediaUrl);
+                    const hasAudioPlayerPreview = !!audioPlaybackUrl;
+                    const hasFilePreviewOverlay = !!(
+                      !isAudioMessageAttachment(m) &&
+                      !isMediaAttachment(m) &&
+                      m.contentType === "FILE" &&
+                      mediaUrl
+                    );
+                    const hasOverlayPreview =
+                      hasAttachmentMediaPreview || hasFilePreviewOverlay || hasAudioPlayerPreview;
                     const isRemovedImageAttachment = m.contentType === "IMAGE" && !mediaUrl && !!m.deletedAt;
-                    const isRemovedFileAttachment = m.contentType === "FILE" && !mediaUrl && !!m.deletedAt;
+                    const isRemovedFileAttachment =
+                      (m.contentType === "FILE" || m.contentType === "AUDIO") && !mediaUrl && !!m.deletedAt;
                     const bodyWithoutRemovedNotice = stripAttachmentRemovalNotice(m.body);
+                    const replyPreview = replyPreviewText(m.replyTo);
 
                     const time = (() => {
                       try {
@@ -2391,9 +2477,13 @@ export function AdminHistoryPage() {
                         }}
                       >
                         <div
-                          className={`bhash-bubble ${isMe ? "bhash-bubble--me" : "bhash-bubble--other"}`}
+                          className={`bhash-bubble ${isMe ? "bhash-bubble--me" : "bhash-bubble--other"} ${
+                            m.replyTo ? "has-reply" : ""
+                          } ${hasOverlayPreview ? "has-visualPreview" : ""} ${
+                            audioPlaybackUrl ? "has-audioPlayer" : ""
+                          }`}
                           style={{
-                            maxWidth: 520,
+                            maxWidth: audioPlaybackUrl ? 336 : 520,
                             padding: "8px 10px",
                             borderRadius: 12,
                             border: "1px solid var(--border)",
@@ -2402,96 +2492,104 @@ export function AdminHistoryPage() {
                           }}
                         >
                           {!isMe ? (
-                            <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.85, marginBottom: 4 }}>
+                            <div className="chat-bubble__sender" style={{ fontSize: 12, fontWeight: 900, opacity: 0.85, marginBottom: 4 }}>
                               {m.sender?.name ?? "Usuário"}
                             </div>
+                          ) : null}
+
+                          {m.broadcastSource ? (
+                            <div className="chat-broadcastOrigin">
+                              Enviada pela lista de transmissão: <strong>{m.broadcastSource.title}</strong>
+                            </div>
+                          ) : null}
+
+                          {m.replyTo ? (
+                            <button
+                              type="button"
+                              className="chat-replyBlock chat-replyBlock--button"
+                              onClick={() => m.replyTo?.id && void jumpToMessage(m.replyTo.id)}
+                              title="Ir para a mensagem original"
+                            >
+                              <div className="chat-replyBlock__name">{m.replyTo.sender?.name ?? "Mensagem"}</div>
+                              <div className="chat-replyBlock__body">{replyPreview}</div>
+                            </button>
                           ) : null}
 
                           {isMediaAttachment(m) && mediaUrl ? (
                             <button
                               type="button"
-                              className="admin-historyInlineImageBtn"
+                              className="chat-imageLink chat-imageLink--btn"
                               onClick={() => openImageViewer(m)}
                               title={isVideoAttachment(m) ? "Abrir mídia" : "Abrir imagem"}
                             >
-                              {isVideoAttachment(m) ? (
-                                <div className="admin-historyVideoPreview">
-                                  <video
+                              <div className="chat-mediaVisualFrame">
+                                {isVideoAttachment(m) ? (
+                                  <div className="chat-videoPreview">
+                                    <video
+                                      src={mediaUrl}
+                                      className="chat-imagePreview chat-imagePreview--framed"
+                                      preload="metadata"
+                                      muted
+                                      playsInline
+                                    />
+                                    <span className="chat-videoPreview__play" aria-hidden="true">
+                                      <PlayOverlayIcon />
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <img
                                     src={mediaUrl}
-                                    className="admin-historyInlineImage"
-                                    preload="metadata"
-                                    muted
-                                    playsInline
+                                    alt={normalizeAttachmentDisplayName(m.attachmentName) || "imagem"}
+                                    className="chat-imagePreview chat-imagePreview--framed"
+                                    loading="lazy"
+                                    decoding="async"
                                   />
-                                  <span className="admin-historyVideoPreview__play" aria-hidden="true">
-                                    <PlayOverlayIcon />
-                                  </span>
+                                )}
+                                <div className="chat-mediaVisualFrame__meta">
+                                  <span>{time}</span>
                                 </div>
-                              ) : (
-                                <img
-                                  src={mediaUrl}
-                                  alt={normalizeAttachmentDisplayName(m.attachmentName) || "imagem"}
-                                  className="admin-historyInlineImage"
-                                />
-                              )}
+                              </div>
                             </button>
                           ) : null}
 
-                          {!isMediaAttachment(m) && m.contentType === "FILE" && mediaUrl ? (
-                            <a
-                              href={mediaUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={`admin-historyInlineFileCard ${isPdfAttachment(m) ? "admin-historyInlineFileCard--pdf" : ""}`}
-                            >
-                              {isPdfAttachment(m) ? (
-                                <div className="admin-historyInlineFileCard__preview" aria-hidden="true">
-                                  <iframe
-                                    src={buildPdfPreviewUrl(m.attachmentUrl) ?? ""}
-                                    title={normalizeAttachmentDisplayName(m.attachmentName) || "Pré-visualização do PDF"}
-                                    loading="lazy"
-                                    tabIndex={-1}
-                                  />
-                                </div>
-                              ) : null}
-                              <div className="admin-historyInlineFileCard__body">
-                                <div className="admin-historyInlineFileCard__name">
-                                  {normalizeAttachmentDisplayName(m.attachmentName) || "Arquivo"}
-                                </div>
-                                <div className="admin-historyInlineFileCard__meta">
-                                  {m.attachmentMime ?? "Arquivo"}
-                                  {m.attachmentSize ? ` • ${formatBytes(m.attachmentSize)}` : ""}
-                                </div>
-                              </div>
-                            </a>
+                          {audioPlaybackUrl ? (
+                            <AudioMessagePlayer
+                              attachmentUrl={m.attachmentUrl}
+                              attachmentName={m.attachmentName}
+                              createdAt={m.createdAt}
+                            />
                           ) : null}
 
+                          {!isAudioMessageAttachment(m) && !isMediaAttachment(m) && m.contentType === "FILE"
+                            ? renderDocumentPreviewCard(m, { showPreviewMeta: true, downloadButton: true })
+                            : null}
+
                           {isRemovedImageAttachment ? (
-                            <div className="admin-historyRemovedAttachment admin-historyRemovedAttachment--image">
-                              <div className="admin-historyRemovedAttachment__icon" aria-hidden="true">
+                            <div className="chat-removedAttachment chat-removedAttachment--image">
+                              <div className="chat-removedAttachment__icon" aria-hidden="true">
                                 <ImageIcon />
                               </div>
-                              <div className="admin-historyRemovedAttachment__title">Essa imagem foi apagada</div>
-                              <div className="admin-historyRemovedAttachment__text">
+                              <div className="chat-removedAttachment__title">Essa imagem foi apagada</div>
+                              <div className="chat-removedAttachment__desc">
                                 Pelo administrador segundo a política de backup de arquivos.
                               </div>
                             </div>
                           ) : null}
 
                           {isRemovedFileAttachment ? (
-                            <div className="admin-historyRemovedAttachment admin-historyRemovedAttachment--file">
-                              <div className="admin-historyRemovedAttachment__icon" aria-hidden="true">
-                                <FileIcon />
+                            <div className="chat-removedAttachment chat-removedAttachment--file">
+                              <div className="chat-removedAttachment__icon" aria-hidden="true">
+                                <AttachmentKindIcon message={m} />
                               </div>
-                              <div className="admin-historyRemovedAttachment__title">Esse documento foi apagado</div>
-                              <div className="admin-historyRemovedAttachment__text">
+                              <div className="chat-removedAttachment__title">Esse documento foi apagado</div>
+                              <div className="chat-removedAttachment__desc">
                                 Pelo administrador segundo a política de backup de arquivos.
                               </div>
                             </div>
                           ) : null}
 
                           {bodyWithoutRemovedNotice ? (
-                            <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35, paddingRight: 54 }}>
+                            <div className="chat-bubble__body">
                               {highlightTerm.trim() ? (
                                 <HighlightText text={bodyWithoutRemovedNotice} query={highlightTerm.trim()} />
                               ) : (
@@ -2500,7 +2598,11 @@ export function AdminHistoryPage() {
                             </div>
                           ) : null}
 
-                          <div className="bhash-time">{time}</div>
+                          {!hasOverlayPreview ? (
+                            <div className="chat-bubble__meta">
+                              <span>{time}</span>
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     );
@@ -2635,40 +2737,99 @@ export function AdminHistoryPage() {
               </button>
             ) : null}
 
-            <div ref={mediaPreviewHostRef} className="admin-historyMediaCard admin-historyMediaCard--bottom">
-              <div className="bhash-modeToggle">
+          </Card>
+        </div>
+      )}
+
+      {mediaLibraryOpen ? (
+        <div className="admin-historyMediaLibrary" onClick={() => setMediaLibraryOpen(false)}>
+          <div className="admin-historyMediaLibrary__panel" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-historyMediaLibrary__top">
+              <div className="admin-historyMediaLibrary__titleGroup">
+                <div className="admin-historyMediaLibrary__title">Dados da conversa</div>
+              </div>
+              <button
+                onClick={() => setMediaLibraryOpen(false)}
+                className="bhash-iconBtn admin-historyMediaLibrary__closeBtn"
+                title="Fechar"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="admin-historyMediaLibrary__toolbar">
+              <div className="admin-historyMediaLibrary__summaryChip">
+                <span className="admin-historyMediaLibrary__summaryLabel">Usuário</span>
+                <strong>{selectedUser?.name ?? "Usuário"}</strong>
+              </div>
+              <div className="admin-historyMediaLibrary__summaryChip">
+                <span className="admin-historyMediaLibrary__summaryLabel">Contato</span>
+                <strong>{selectedConv?.otherUser?.name ?? "Contato"}</strong>
+              </div>
+              <div className="admin-historyMediaLibrary__tabGroup" role="tablist" aria-label="Filtro de anexos">
                 <button
                   type="button"
-                  className={`bhash-modeToggle__btn ${mediaTab === "image" ? "is-active" : ""}`}
-                  onClick={() => setMediaTab("image")}
+                  role="tab"
+                  aria-selected={mediaLibraryTab === "image"}
+                  className={`admin-historyMediaLibrary__tabBtn ${mediaLibraryTab === "image" ? "is-active" : ""}`}
+                  onClick={() => setMediaLibraryTab("image")}
                 >
                   Mídias ({imageMediaItems.length})
                 </button>
                 <button
                   type="button"
-                  className={`bhash-modeToggle__btn ${mediaTab === "file" ? "is-active" : ""}`}
-                  onClick={() => setMediaTab("file")}
+                  role="tab"
+                  aria-selected={mediaLibraryTab === "file"}
+                  className={`admin-historyMediaLibrary__tabBtn ${mediaLibraryTab === "file" ? "is-active" : ""}`}
+                  onClick={() => setMediaLibraryTab("file")}
                 >
                   Documentos ({fileMediaItems.length})
                 </button>
               </div>
+            </div>
 
-              {mediaTab === "image" ? (
-                <div
-                  className="admin-historyMediaPreviewRow"
-                  style={{ gridTemplateColumns: `repeat(${mediaPreviewGridColumns}, minmax(0, 1fr))` }}
-                >
-                  {imagePreviewData.items.length === 0 ? (
-                    <div className="admin-historyEmpty">Nenhuma mídia ativa.</div>
-                  ) : (
-                    imagePreviewData.items.map((item) => {
-                      const imageUrl = toAbsoluteUrl(item.attachmentUrl);
-                      return (
-                        <div key={item.id} className="admin-historyMediaPreviewCard">
+            {mediaMsg ? <div style={{ color: "#ff8a8a", fontSize: 13 }}>{mediaMsg}</div> : null}
+
+            {mediaLibraryTab === "image" ? (
+              <div className="admin-historyMediaStrip">
+                {mediaLoading && mediaLibraryItems.length === 0 ? (
+                  <div className="admin-historyEmpty">Carregando mídias...</div>
+                ) : mediaLibraryItems.length === 0 ? (
+                  <div className="admin-historyEmpty">Nenhuma mídia ativa.</div>
+                ) : (
+                  mediaLibraryItems.map((item) => {
+                    const imageUrl = toAbsoluteUrl(item.attachmentUrl);
+                    const isAudio = isAudioMessageAttachment(item);
+                    return (
+                      <div
+                        key={item.id}
+                        className={`admin-historyMediaThumbCard ${isAudio ? "admin-historyMediaThumbCard--audio" : ""}`}
+                      >
+                        {isAudio ? (
+                          <div className="admin-historyMediaThumbCard__audioWrap">
+                            <div className="admin-historyMediaThumbCard__audioStage">
+                              <div className="admin-historyMediaThumb admin-historyMediaThumb--audioPoster" aria-hidden="true">
+                                <div className="admin-historyMediaThumb__audioIcon">
+                                  <AudioPosterIcon />
+                                </div>
+                              </div>
+                              <div className="admin-historyMediaThumbCard__audioPlayerWrap">
+                                <div className="chat-attachmentPreview__audio">
+                                  <AudioMessagePlayer
+                                    attachmentUrl={item.attachmentUrl}
+                                    attachmentName={item.attachmentName}
+                                    createdAt={item.createdAt}
+                                    showMeta={false}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
                           <button
-                            className="admin-historyMediaPreviewThumb"
+                            className="admin-historyMediaThumb"
                             onClick={() => openImageViewer(item)}
-                            title={isVideoAttachment(item) ? "Abrir mídia" : "Abrir imagem"}
+                            title="Abrir visualizador"
                           >
                             {isVideoAttachment(item) ? (
                               <div className="admin-historyVideoPreview">
@@ -2687,188 +2848,7 @@ export function AdminHistoryPage() {
                               <img src={imageUrl ?? ""} alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"} />
                             )}
                           </button>
-                          <div className="admin-historyMediaPreviewActions">
-                            <button
-                              type="button"
-                              className="admin-historyMediaPreviewActionBtn"
-                              onClick={() => void jumpToMessage(item.id)}
-                            >
-                              Ver na conversa
-                            </button>
-                            <button
-                              type="button"
-                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon"
-                              onClick={() => void downloadAttachment(item)}
-                              title={isVideoAttachment(item) ? "Baixar vídeo" : "Baixar mídia"}
-                            >
-                              <DownloadIcon />
-                            </button>
-                            <button
-                              type="button"
-                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon is-danger"
-                              onClick={() => void removeAttachment(item)}
-                              disabled={removingAttachmentId === item.id}
-                              title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir imagem"}
-                            >
-                              <TrashIcon />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-
-                  {imagePreviewData.hasMore ? (
-                    <button
-                      type="button"
-                      className="admin-historyMediaMoreBtn"
-                      onClick={() => {
-                        setMediaLibraryTab("image");
-                        setMediaLibraryOpen(true);
-                      }}
-                    >
-                      Ver mais +
-                    </button>
-                  ) : null}
-                </div>
-              ) : (
-                <div
-                  className="admin-historyMediaPreviewRow admin-historyMediaPreviewRow--files"
-                  style={{ gridTemplateColumns: `repeat(${mediaPreviewGridColumns}, minmax(0, 1fr))` }}
-                >
-                  {filePreviewData.items.length === 0 ? (
-                    <div className="admin-historyEmpty">Nenhum documento ativo.</div>
-                  ) : (
-                    filePreviewData.items.map((item) => {
-                      const fileUrl = toAbsoluteUrl(item.attachmentUrl);
-                      return (
-                        <div key={item.id} className="admin-historyMediaPreviewCard admin-historyMediaPreviewCard--file">
-                          <a
-                            href={fileUrl ?? "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="admin-historyMediaMiniFile"
-                            onClick={(e) => {
-                              if (!fileUrl) e.preventDefault();
-                            }}
-                            title={normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
-                          >
-                            <div className="admin-historyMediaMiniFile__name">
-                              {normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
-                            </div>
-                            <div className="admin-historyMediaMiniFile__meta">
-                              {item.attachmentMime ?? "Arquivo"}
-                              {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
-                            </div>
-                          </a>
-                          <div className="admin-historyMediaPreviewActions">
-                            <button
-                              type="button"
-                              className="admin-historyMediaPreviewActionBtn"
-                              onClick={() => void jumpToMessage(item.id)}
-                            >
-                              Ver na conversa
-                            </button>
-                            <button
-                              type="button"
-                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon"
-                              onClick={() => void downloadAttachment(item)}
-                              title="Baixar documento"
-                            >
-                              <DownloadIcon />
-                            </button>
-                            <button
-                              type="button"
-                              className="admin-historyMediaPreviewActionBtn admin-historyMediaPreviewActionBtn--icon is-danger"
-                              onClick={() => void removeAttachment(item)}
-                              disabled={removingAttachmentId === item.id}
-                              title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir documento"}
-                            >
-                              <TrashIcon />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-
-                  {filePreviewData.hasMore ? (
-                    <button
-                      type="button"
-                      className="admin-historyMediaMoreBtn"
-                      onClick={() => {
-                        setMediaLibraryTab("file");
-                        setMediaLibraryOpen(true);
-                      }}
-                    >
-                      Ver mais +
-                    </button>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          </Card>
-        </div>
-      )}
-
-      {mediaLibraryOpen ? (
-        <div className="admin-historyMediaLibrary" onClick={() => setMediaLibraryOpen(false)}>
-          <div className="admin-historyMediaLibrary__panel" onClick={(e) => e.stopPropagation()}>
-            <div className="admin-historyMediaLibrary__top">
-              <div className="admin-historyMediaLibrary__title">Anexos da conversa</div>
-              <button onClick={() => setMediaLibraryOpen(false)} className="bhash-iconBtn" title="Fechar">
-                ×
-              </button>
-            </div>
-
-            <div className="bhash-modeToggle">
-              <button
-                type="button"
-                className={`bhash-modeToggle__btn ${mediaLibraryTab === "image" ? "is-active" : ""}`}
-                onClick={() => setMediaLibraryTab("image")}
-              >
-                Mídias ({imageMediaItems.length})
-              </button>
-              <button
-                type="button"
-                className={`bhash-modeToggle__btn ${mediaLibraryTab === "file" ? "is-active" : ""}`}
-                onClick={() => setMediaLibraryTab("file")}
-              >
-                Documentos ({fileMediaItems.length})
-              </button>
-            </div>
-
-            {mediaLibraryTab === "image" ? (
-              <div className="admin-historyMediaStrip">
-                {mediaLibraryItems.length === 0 ? (
-                  <div className="admin-historyEmpty">Nenhuma mídia ativa.</div>
-                ) : (
-                  mediaLibraryItems.map((item) => {
-                    const imageUrl = toAbsoluteUrl(item.attachmentUrl);
-                    return (
-                      <div key={item.id} className="admin-historyMediaThumbCard">
-                        <button
-                          className="admin-historyMediaThumb"
-                          onClick={() => openImageViewer(item)}
-                          title="Abrir visualizador"
-                        >
-                          {isVideoAttachment(item) ? (
-                            <div className="admin-historyVideoPreview">
-                              <video
-                                src={imageUrl ?? ""}
-                                className="admin-historyMediaThumbVideo"
-                                preload="metadata"
-                                muted
-                                playsInline
-                              />
-                              <span className="admin-historyVideoPreview__play" aria-hidden="true">
-                                <PlayOverlayIcon />
-                              </span>
-                            </div>
-                          ) : (
-                            <img src={imageUrl ?? ""} alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"} />
-                          )}
-                        </button>
+                        )}
                         <div className="admin-historyMediaThumbCard__meta">{fmt(item.createdAt)}</div>
                         <div className="admin-historyMediaThumbCard__actions">
                           <button
@@ -2882,7 +2862,7 @@ export function AdminHistoryPage() {
                             type="button"
                             onClick={() => void downloadAttachment(item)}
                             className="admin-historyMediaLibraryActionBtn admin-historyMediaLibraryActionBtn--icon"
-                            title={isVideoAttachment(item) ? "Baixar vídeo" : "Baixar mídia"}
+                            title={isAudio ? "Baixar áudio" : isVideoAttachment(item) ? "Baixar vídeo" : "Baixar mídia"}
                           >
                             <DownloadIcon />
                           </button>
@@ -2891,7 +2871,7 @@ export function AdminHistoryPage() {
                             onClick={() => void removeAttachment(item)}
                             className="admin-historyMediaLibraryActionBtn admin-historyMediaLibraryActionBtn--icon is-danger"
                             disabled={removingAttachmentId === item.id}
-                            title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir imagem"}
+                            title={removingAttachmentId === item.id ? "Excluindo..." : "Excluir mídia"}
                           >
                             <TrashIcon />
                           </button>
@@ -2903,7 +2883,9 @@ export function AdminHistoryPage() {
               </div>
             ) : (
               <div className="admin-historyMediaFiles">
-                {mediaLibraryItems.length === 0 ? (
+                {mediaLoading && mediaLibraryItems.length === 0 ? (
+                  <div className="admin-historyEmpty">Carregando documentos...</div>
+                ) : mediaLibraryItems.length === 0 ? (
                   <div className="admin-historyEmpty">Nenhum documento ativo.</div>
                 ) : (
                   mediaLibraryItems.map((item) => {
@@ -2914,22 +2896,12 @@ export function AdminHistoryPage() {
                           className="admin-historyMediaFileRow__body"
                           onClick={() => void jumpToMessage(item.id)}
                           title="Ir para o documento na conversa"
-                          >
-                            {isPdfAttachment(item) ? (
-                              <div className="admin-historyInlineFileCard__preview admin-historyInlineFileCard__preview--library" aria-hidden="true">
-                                <iframe
-                                  src={buildPdfPreviewUrl(item.attachmentUrl) ?? ""}
-                                  title={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do PDF"}
-                                  loading="lazy"
-                                  tabIndex={-1}
-                                />
-                              </div>
-                            ) : null}
-                            <div style={{ fontWeight: 800 }}>{normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}</div>
-                            <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                              {item.attachmentMime ?? "Arquivo"}
-                            {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
-                            {` • ${fmt(item.createdAt)}`}
+                        >
+                          <div className="admin-historyMediaFileRow__previewWrap">
+                            {renderDocumentPreviewCard(item)}
+                          </div>
+                          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
+                            {fmt(item.createdAt)}
                           </div>
                         </button>
                         <div className="admin-historyMediaFileRow__actions">
@@ -3221,15 +3193,6 @@ function ImageIcon() {
   );
 }
 
-function FileIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-      <path d="M8 3h6l5 5v13H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke="currentColor" strokeWidth="2" />
-      <path d="M14 3v6h6" stroke="currentColor" strokeWidth="2" />
-    </svg>
-  );
-}
-
 function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
@@ -3255,6 +3218,28 @@ function PlayOverlayIcon() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
       <path d="M9 7.5v9l7-4.5-7-4.5Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function AudioPosterIcon() {
+  return (
+    <svg viewBox="0 0 64 64" width="64" height="64" fill="none" aria-hidden="true">
+      <path
+        d="M16 33c0-11 7.2-20 16-20s16 9 16 20"
+        stroke="currentColor"
+        strokeWidth="5.5"
+        strokeLinecap="round"
+      />
+      <path
+        d="M20 28.5c2.7-4.7 7.1-7.5 12-7.5s9.3 2.8 12 7.5"
+        stroke="currentColor"
+        strokeWidth="4.2"
+        strokeLinecap="round"
+        opacity="0.92"
+      />
+      <rect x="18" y="30" width="9" height="19" rx="4.5" fill="currentColor" />
+      <rect x="37" y="30" width="9" height="19" rx="4.5" fill="currentColor" />
     </svg>
   );
 }

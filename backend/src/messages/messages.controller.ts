@@ -20,11 +20,16 @@ import { diskStorage } from 'multer';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ChatEventsService } from '../chat/chat-events.service';
-import { isLikelyMediaFile, normalizeUploadedFileName } from '../common/upload-filename.util';
+import { normalizeUploadedFileName } from '../common/upload-filename.util';
 
 function safeAttachmentExt(original: string) {
   const ext = path.extname(normalizeUploadedFileName(original) || '').toLowerCase();
   return ext || '';
+}
+
+function normalizeUploadMode(raw?: string | null) {
+  if (raw === 'image' || raw === 'file' || raw === 'audio') return raw;
+  return 'file';
 }
 
 @Controller()
@@ -88,10 +93,8 @@ export class MessagesController {
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: (_req, file, cb) => {
-          const isMedia = isLikelyMediaFile(file);
-          const folder = isMedia ? 'chat-media' : 'chat-files';
-          const dir = path.join(process.cwd(), 'public', 'uploads', folder);
+        destination: (_req, _file, cb) => {
+          const dir = path.join(process.cwd(), 'public', 'uploads', 'chat');
           fs.mkdirSync(dir, { recursive: true });
           cb(null, dir);
         },
@@ -110,27 +113,36 @@ export class MessagesController {
     body: {
       body?: string;
       replyToId?: string;
-      uploadMode?: 'image' | 'file';
+      uploadMode?: 'image' | 'file' | 'audio';
     },
     @UploadedFile() file?: Express.Multer.File,
   ) {
-    const msg = await this.messages.send({
+    const result = await this.messages.send({
       userId: req.user.sub,
       conversationId,
       body: body.body,
       replyToId: body.replyToId ?? null,
       file,
-      uploadMode: body.uploadMode ?? null,
+      uploadMode: normalizeUploadMode(body.uploadMode),
     });
 
-    this.events.emitMessageNew(conversationId, msg);
-    const participantIds = await this.messages.getConversationParticipantIds(conversationId);
-    for (const participantId of participantIds) {
-      this.events.emitUserMessageNew(participantId, msg);
-      this.events.emitConversationsSync(participantId, { conversationId });
+    for (const delivery of result.deliveries) {
+      if (delivery.emitToConversationRoom !== false) {
+        this.events.emitMessageNew(delivery.conversationId, delivery.message);
+      }
+      const notifyUserIds = delivery.notifyUserIds?.length ? delivery.notifyUserIds : delivery.participantIds;
+      const syncUserIds = delivery.syncUserIds?.length ? delivery.syncUserIds : notifyUserIds;
+      for (const participantId of notifyUserIds) {
+        this.events.emitUserMessageNew(participantId, delivery.message);
+      }
+      for (const participantId of syncUserIds) {
+        this.events.emitConversationsSync(participantId, {
+          conversationId: delivery.conversationId,
+        });
+      }
     }
 
-    return { ok: true, message: msg };
+    return { ok: true, message: result.message };
   }
 
   @Patch('messages/:id/favorite')
@@ -172,15 +184,52 @@ export class MessagesController {
     return { ok: true };
   }
 
+  @Post('conversations/:id/hide-removed-notices')
+  async hideRemovedNotices(@Req() req: any, @Param('id') conversationId: string) {
+    const result = await this.messages.removeRemovedAttachmentNotices(req.user.sub, conversationId);
+    if (result.messageIds.length) {
+      this.events.emitMessagesHidden(result.conversationId, {
+        userId: req.user.sub,
+        messageIds: result.messageIds,
+      });
+      this.events.emitConversationsSync(req.user.sub, {
+        conversationId: result.conversationId,
+        force: true,
+      });
+    }
+    return { ok: true, messageIds: result.messageIds };
+  }
+
+  @Get('conversations/:id/clear-summary')
+  async clearConversationSummary(@Req() req: any, @Param('id') conversationId: string) {
+    const result = await this.messages.getClearConversationSummary(req.user.sub, conversationId);
+    return { ok: true, ...result };
+  }
+
   @Post('conversations/:id/clear')
-  async clearConversation(@Req() req: any, @Param('id') conversationId: string) {
-    const result = await this.messages.clearConversation(req.user.sub, conversationId);
-    this.events.emitConversationCleared(result.conversationId, { userId: req.user.sub });
+  async clearConversation(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+    @Body() body?: { keepFavorites?: boolean },
+  ) {
+    const result = body?.keepFavorites
+      ? await this.messages.clearConversationKeepingFavorites(req.user.sub, conversationId)
+      : await this.messages.clearConversation(req.user.sub, conversationId);
+    if (result.keptFavorites) {
+      if (result.messageIds.length) {
+        this.events.emitMessagesHidden(result.conversationId, {
+          userId: req.user.sub,
+          messageIds: result.messageIds,
+        });
+      }
+    } else {
+      this.events.emitConversationCleared(result.conversationId, { userId: req.user.sub });
+    }
     this.events.emitConversationsSync(req.user.sub, {
       conversationId: result.conversationId,
       force: true,
     });
-    return { ok: true };
+    return { ok: true, messageIds: result.messageIds };
   }
 
   @Delete('messages/:id')
@@ -197,3 +246,4 @@ export class MessagesController {
     return { ok: true };
   }
 }
+

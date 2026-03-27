@@ -1,14 +1,55 @@
+import { randomUUID } from 'crypto';
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
-import { mediaRetentionIntervalLabel } from '../admin-history/media-retention.util';
 import {
+  isAttachmentRemovalNoticeText,
+  mediaRetentionIntervalLabel,
+} from '../admin-history/media-retention.util';
+import {
+  isLikelyAudioFile,
   isLikelyMediaFile,
   normalizeUploadedFileName,
 } from '../common/upload-filename.util';
+import {
+  removeUploadedChatAttachment,
+  validateUploadedChatAttachment,
+} from '../common/upload-content.util';
+
+type MessageDelivery = {
+  conversationId: string;
+  message: any;
+  participantIds: string[];
+  notifyUserIds?: string[];
+  syncUserIds?: string[];
+  emitToConversationRoom?: boolean;
+};
 
 @Injectable()
 export class MessagesService {
   constructor(private readonly prisma: PrismaService) {}
+
+  private async moveUploadedAudioFile(file: Express.Multer.File) {
+    if (!file?.path || !file.filename) return;
+
+    const targetDir = path.join(process.cwd(), 'public', 'uploads', 'chat-audio');
+    const targetPath = path.join(targetDir, file.filename);
+    if (path.resolve(file.path) === path.resolve(targetPath)) return;
+
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.rename(file.path, targetPath);
+    file.destination = targetDir;
+    file.path = targetPath;
+  }
+
+  private attachmentStorageKind(attachmentUrl?: string | null) {
+    const url = String(attachmentUrl ?? '').toLowerCase();
+    if (url.includes('/chat-files/')) return 'file';
+    if (url.includes('/chat-media/')) return 'media';
+    if (url.includes('/chat-audio/')) return 'audio';
+    return null;
+  }
 
   private normalizeAttachmentName(value?: string | null) {
     const normalized = normalizeUploadedFileName(value);
@@ -21,8 +62,26 @@ export class MessagesService {
     attachmentName?: string | null;
     attachmentUrl?: string | null;
   }) {
+    const storageKind = this.attachmentStorageKind(message.attachmentUrl);
+    if (storageKind === 'file') return false;
+    if (storageKind === 'media') return true;
+    if (storageKind === 'audio') return false;
     if (message.contentType === 'IMAGE') return true;
+    if (message.contentType === 'FILE') return false;
+    if (message.contentType === 'AUDIO') return false;
     return isLikelyMediaFile(message);
+  }
+
+  private isAudioAttachment(message: {
+    contentType?: string | null;
+    attachmentMime?: string | null;
+    attachmentName?: string | null;
+    attachmentUrl?: string | null;
+  }) {
+    const storageKind = this.attachmentStorageKind(message.attachmentUrl);
+    if (storageKind === 'audio') return true;
+    if (message.contentType === 'AUDIO') return true;
+    return false;
   }
 
   private mapReplyTo(replyTo: any) {
@@ -30,7 +89,11 @@ export class MessagesService {
     return {
       id: replyTo.id,
       body: replyTo.body ?? '',
-      contentType: this.isMediaAttachment(replyTo) ? 'IMAGE' : replyTo.contentType,
+      contentType: this.isMediaAttachment(replyTo)
+        ? 'IMAGE'
+        : this.isAudioAttachment(replyTo)
+        ? 'AUDIO'
+        : replyTo.contentType,
       attachmentUrl: replyTo.attachmentUrl ?? null,
       attachmentName: this.normalizeAttachmentName(replyTo.attachmentName),
       attachmentMime: replyTo.attachmentMime ?? null,
@@ -52,7 +115,7 @@ export class MessagesService {
       conversationId: msg.conversationId,
       senderId: msg.senderId,
       body: msg.body ?? '',
-      contentType: this.isMediaAttachment(msg) ? 'IMAGE' : msg.contentType,
+      contentType: this.isMediaAttachment(msg) ? 'IMAGE' : this.isAudioAttachment(msg) ? 'AUDIO' : msg.contentType,
       attachmentUrl: msg.attachmentUrl ?? null,
       attachmentName: this.normalizeAttachmentName(msg.attachmentName),
       attachmentMime: msg.attachmentMime ?? null,
@@ -60,6 +123,13 @@ export class MessagesService {
       replyToId: msg.replyToId ?? null,
       deletedAt: msg.deletedAt ?? null,
       sender: msg.sender ?? null,
+      broadcastSource:
+        msg.broadcastListId && msg.broadcastListTitle
+          ? {
+              id: msg.broadcastListId,
+              title: msg.broadcastListTitle,
+            }
+          : null,
       replyTo: this.mapReplyTo(msg.replyTo),
       reactions: msg.reactions ?? [],
       isFavorited: Array.isArray(msg.favorites) ? msg.favorites.length > 0 : !!msg.isFavorited,
@@ -69,22 +139,258 @@ export class MessagesService {
   private async assertMember(userId: string, conversationId: string) {
     const conv = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { id: true, userAId: true, userBId: true },
+      select: {
+        id: true,
+        kind: true,
+        title: true,
+        createdById: true,
+        broadcastIncludeAllUsers: true,
+        userAId: true,
+        userBId: true,
+        participants: {
+          select: { userId: true },
+        },
+        broadcastTargets: {
+          select: { userId: true },
+        },
+        broadcastCompanyTargets: {
+          select: { companyId: true },
+        },
+        broadcastDepartmentTargets: {
+          select: { departmentId: true },
+        },
+        broadcastExcludedUsers: {
+          select: { userId: true },
+        },
+        states: {
+          where: { userId },
+          take: 1,
+          select: {
+            hidden: true,
+            leftAt: true,
+            clearedAt: true,
+          },
+        },
+      },
     });
 
     if (!conv) throw new BadRequestException('Conversa não encontrada');
 
-    const ok = conv.userAId === userId || conv.userBId === userId;
+    const participantIds = this.participantIdsFromConversation(conv);
+    const state = conv.states?.[0] ?? null;
+    const ok =
+      participantIds.includes(userId) ||
+      (conv.kind === 'GROUP' && !!state?.leftAt && !state?.hidden);
     if (!ok) throw new ForbiddenException('Você não participa dessa conversa');
 
     return conv;
   }
 
+  private async assertCurrentParticipant(userId: string, conversationId: string) {
+    const conv = await this.assertMember(userId, conversationId);
+    const ok = this.participantIdsFromConversation(conv).includes(userId);
+    if (!ok) throw new ForbiddenException('Você não participa mais dessa conversa');
+    return conv;
+  }
+
+  private participantIdsFromConversation(conv: {
+    userAId?: string | null;
+    userBId?: string | null;
+    participants?: Array<{ userId: string }>;
+  }) {
+    return Array.from(
+      new Set(
+        [
+          ...(Array.isArray(conv?.participants) ? conv.participants.map((item) => item.userId) : []),
+          conv?.userAId ?? null,
+          conv?.userBId ?? null,
+        ].filter((value): value is string => !!value),
+      ),
+    );
+  }
+
+  private async ensureVisibleStates(
+    conversationId: string,
+    participantIds: string[],
+    currentUserId?: string | null,
+  ) {
+    const uniqueIds = Array.from(
+      new Set(participantIds.map((value) => String(value ?? '').trim()).filter(Boolean)),
+    );
+    if (!uniqueIds.length) return;
+
+    const now = new Date();
+    await this.prisma.$transaction(
+      uniqueIds.map((participantId) =>
+        this.prisma.conversationUserState.upsert({
+          where: {
+            conversationId_userId: {
+              conversationId,
+              userId: participantId,
+            },
+          },
+          update:
+            participantId === currentUserId
+              ? { hidden: false, leftAt: null, lastReadAt: now }
+              : { hidden: false, leftAt: null },
+          create:
+            participantId === currentUserId
+              ? {
+                  conversationId,
+                  userId: participantId,
+                  hidden: false,
+                  leftAt: null,
+                  lastReadAt: now,
+                }
+              : {
+                  conversationId,
+                  userId: participantId,
+                  hidden: false,
+                  leftAt: null,
+                },
+        }),
+      ),
+    );
+  }
+
+  private async ensureBroadcastDirectStates(
+    conversationId: string,
+    senderUserId: string,
+    recipientUserId: string,
+    keepSenderHidden: boolean,
+  ) {
+    const now = new Date();
+    const operations = [
+      this.prisma.conversationUserState.upsert({
+        where: {
+          conversationId_userId: {
+            conversationId,
+            userId: recipientUserId,
+          },
+        },
+        update: { hidden: false, leftAt: null },
+        create: {
+          conversationId,
+          userId: recipientUserId,
+          hidden: false,
+          leftAt: null,
+        },
+      }),
+    ];
+
+    if (keepSenderHidden) {
+      operations.push(
+        this.prisma.conversationUserState.upsert({
+          where: {
+            conversationId_userId: {
+              conversationId,
+              userId: senderUserId,
+            },
+          },
+          update: {
+            hidden: true,
+            leftAt: null,
+            lastReadAt: now,
+          },
+          create: {
+            conversationId,
+            userId: senderUserId,
+            hidden: true,
+            leftAt: null,
+            lastReadAt: now,
+          },
+        }),
+      );
+    }
+
+    await this.prisma.$transaction(operations);
+  }
+
+  private async getOrCreateDirectConversation(userId: string, otherUserId: string) {
+    const [userAId, userBId] = userId < otherUserId ? [userId, otherUserId] : [otherUserId, userId];
+    const existing = await this.prisma.conversation.findUnique({
+      where: { userAId_userBId: { userAId, userBId } },
+      select: { id: true },
+    });
+
+    const conv = await this.prisma.conversation.upsert({
+      where: { userAId_userBId: { userAId, userBId } },
+      update: {
+        kind: 'DIRECT',
+        title: null,
+        avatarUrl: null,
+      },
+      create: {
+        id: randomUUID(),
+        kind: 'DIRECT',
+        userAId,
+        userBId,
+      },
+      select: {
+        id: true,
+        kind: true,
+        createdById: true,
+        userAId: true,
+        userBId: true,
+        participants: {
+          select: { userId: true },
+        },
+        broadcastTargets: {
+          select: { userId: true },
+        },
+        states: {
+          where: {
+            userId: {
+              in: [userId, otherUserId],
+            },
+          },
+          select: {
+            userId: true,
+            hidden: true,
+          },
+        },
+      },
+    });
+
+    await this.prisma.conversationParticipant.createMany({
+      data: [userAId, userBId].map((participantId) => ({
+        id: randomUUID(),
+        conversationId: conv.id,
+        userId: participantId,
+        addedById: userId,
+      })),
+      skipDuplicates: true,
+    });
+
+    const participants =
+      conv.participants.length >= 2
+        ? conv.participants
+        : [{ userId: userAId }, { userId: userBId }];
+
+    return {
+      ...conv,
+      participants,
+      isNewConversation: !existing,
+      senderHidden: conv.states.find((state) => state.userId === userId)?.hidden ?? null,
+    };
+  }
   private async getConversationState(userId: string, conversationId: string) {
     return this.prisma.conversationUserState.findUnique({
       where: { conversationId_userId: { conversationId, userId } },
-      select: { clearedAt: true },
+      select: { clearedAt: true, leftAt: true },
     });
+  }
+
+  private async visibleConversationMessagesWhere(userId: string, conversationId: string) {
+    const state = await this.getConversationState(userId, conversationId);
+    const createdAt: Record<string, Date> = {};
+    if (state?.clearedAt) createdAt.gt = state.clearedAt;
+    if (state?.leftAt) createdAt.lte = state.leftAt;
+    return {
+      conversationId,
+      hiddenForUsers: { none: { userId } },
+      ...(Object.keys(createdAt).length ? { createdAt } : {}),
+    };
   }
 
   private messageInclude(currentUserId: string) {
@@ -134,10 +440,6 @@ export class MessagesService {
           },
         },
       },
-      hiddenForUsers: {
-        where: { userId: currentUserId },
-        select: { id: true },
-      },
     };
   }
 
@@ -152,18 +454,97 @@ export class MessagesService {
     return this.serializeMessage(msg);
   }
 
+  private async createStoredMessage(input: {
+    conversationId: string;
+    userId: string;
+    body?: string | null;
+    contentType: 'TEXT' | 'IMAGE' | 'FILE' | 'AUDIO';
+    attachmentUrl?: string | null;
+    attachmentName?: string | null;
+    attachmentMime?: string | null;
+    attachmentSize?: number | null;
+    replyToId?: string | null;
+    broadcastListId?: string | null;
+    broadcastListTitle?: string | null;
+  }) {
+    return this.prisma.message.create({
+      data: {
+        id: randomUUID(),
+        conversationId: input.conversationId,
+        senderId: input.userId,
+        body: input.body ?? null,
+        contentType: input.contentType,
+        attachmentUrl: input.attachmentUrl ?? null,
+        attachmentName: input.attachmentName ?? null,
+        attachmentMime: input.attachmentMime ?? null,
+        attachmentSize: input.attachmentSize ?? null,
+        replyToId: input.replyToId ?? null,
+        broadcastListId: input.broadcastListId ?? null,
+        broadcastListTitle: input.broadcastListTitle ?? null,
+      },
+      select: { id: true },
+    });
+  }
+
+  private async resolveBroadcastTargetIds(conv: {
+    createdById?: string | null;
+    broadcastIncludeAllUsers?: boolean | null;
+    broadcastTargets?: Array<{ userId: string }>;
+    broadcastCompanyTargets?: Array<{ companyId: string }>;
+    broadcastDepartmentTargets?: Array<{ departmentId: string }>;
+    broadcastExcludedUsers?: Array<{ userId: string }>;
+  }) {
+    const ownerId = String(conv.createdById ?? '').trim();
+    const targetIds = new Set(
+      (conv.broadcastTargets ?? [])
+        .map((item) => String(item?.userId ?? '').trim())
+        .filter((value) => !!value && value !== ownerId),
+    );
+
+    const companyIds = (conv.broadcastCompanyTargets ?? [])
+      .map((item) => String(item?.companyId ?? '').trim())
+      .filter(Boolean);
+    const departmentIds = (conv.broadcastDepartmentTargets ?? [])
+      .map((item) => String(item?.departmentId ?? '').trim())
+      .filter(Boolean);
+
+    if (conv.broadcastIncludeAllUsers || companyIds.length || departmentIds.length) {
+      const dynamicUsers = await this.prisma.user.findMany({
+        where: {
+          isActive: true,
+          id: { not: ownerId },
+          OR: conv.broadcastIncludeAllUsers
+            ? undefined
+            : [
+                ...(companyIds.length ? [{ companyId: { in: companyIds } }] : []),
+                ...(departmentIds.length ? [{ departmentId: { in: departmentIds } }] : []),
+              ],
+        },
+        select: { id: true },
+      });
+
+      for (const user of dynamicUsers) targetIds.add(user.id);
+    }
+
+    for (const excluded of conv.broadcastExcludedUsers ?? []) {
+      targetIds.delete(String(excluded?.userId ?? '').trim());
+    }
+
+    return Array.from(targetIds);
+  }
+
   async send(input: {
     userId: string;
     conversationId: string;
     body?: string;
     replyToId?: string | null;
     file?: Express.Multer.File;
-    uploadMode?: 'image' | 'file' | null;
-  }) {
+    uploadMode?: 'image' | 'file' | 'audio' | null;
+  }): Promise<{ message: any; deliveries: MessageDelivery[] }> {
     const body = (input.body ?? '').trim();
     const file = input.file;
 
-    const conv = await this.assertMember(input.userId, input.conversationId);
+    const conv = await this.assertCurrentParticipant(input.userId, input.conversationId);
 
     if (!body && !file) {
       throw new BadRequestException('Mensagem vazia');
@@ -180,91 +561,136 @@ export class MessagesService {
       }
     }
 
-    let contentType: 'TEXT' | 'IMAGE' | 'FILE' = 'TEXT';
+    let contentType: 'TEXT' | 'IMAGE' | 'FILE' | 'AUDIO' = 'TEXT';
     let attachmentUrl: string | null = null;
     let attachmentName: string | null = null;
     let attachmentMime: string | null = null;
     let attachmentSize: number | null = null;
 
     if (file) {
-      const treatAsMedia = input.uploadMode === 'image' && isLikelyMediaFile(file);
+      const invalidAttachmentMessage = await validateUploadedChatAttachment(file);
+      if (invalidAttachmentMessage) {
+        await removeUploadedChatAttachment(file);
+        throw new BadRequestException(invalidAttachmentMessage);
+      }
 
-      contentType = treatAsMedia ? 'IMAGE' : 'FILE';
-      attachmentUrl = treatAsMedia
-        ? `/static/uploads/chat-media/${file.filename}`
-        : `/static/uploads/chat-files/${file.filename}`;
+      if (input.uploadMode === 'audio' && !isLikelyAudioFile(file)) {
+        await removeUploadedChatAttachment(file);
+        throw new BadRequestException('Selecione um arquivo de áudio válido.');
+      }
+
+      const treatAsMedia = input.uploadMode === 'image' && isLikelyMediaFile(file);
+      const treatAsAudio = input.uploadMode === 'audio' && isLikelyAudioFile(file);
+
+      if (treatAsAudio) {
+        await this.moveUploadedAudioFile(file);
+      }
+
+      contentType = treatAsMedia ? 'IMAGE' : treatAsAudio ? 'AUDIO' : 'FILE';
+      attachmentUrl = treatAsAudio
+        ? `/static/uploads/chat-audio/${file.filename}`
+        : `/static/uploads/chat/${file.filename}`;
       attachmentName = this.normalizeAttachmentName(file.originalname);
       attachmentMime = file.mimetype;
       attachmentSize = file.size;
     }
 
-    const msg = await this.prisma.message.create({
-      data: {
-        conversationId: input.conversationId,
-        senderId: input.userId,
-        body: body || null,
-        contentType,
-        attachmentUrl,
-        attachmentName,
-        attachmentMime,
-        attachmentSize,
-        replyToId: input.replyToId ?? null,
-      },
-      select: { id: true },
+    const msg = await this.createStoredMessage({
+      conversationId: input.conversationId,
+      userId: input.userId,
+      body: body || null,
+      contentType,
+      attachmentUrl,
+      attachmentName,
+      attachmentMime,
+      attachmentSize,
+      replyToId: input.replyToId ?? null,
+      broadcastListId: conv.kind === 'BROADCAST' ? conv.id : null,
+      broadcastListTitle: conv.kind === 'BROADCAST' ? conv.title ?? 'Lista de transmissão' : null,
     });
 
-    const now = new Date();
-    const participantIds = [conv.userAId, conv.userBId];
+    await this.prisma.conversation.update({
+      where: { id: input.conversationId },
+      data: {},
+    });
 
-    await this.prisma.$transaction([
-      this.prisma.conversation.update({
-        where: { id: input.conversationId },
-        data: {},
-      }),
-      ...participantIds.map((participantId) =>
-        this.prisma.conversationUserState.upsert({
-          where: {
-            conversationId_userId: {
-              conversationId: input.conversationId,
-              userId: participantId,
-            },
-          },
-          update:
-            participantId === input.userId
-              ? { hidden: false, lastReadAt: now }
-              : { hidden: false },
-          create:
-            participantId === input.userId
-              ? {
-                  conversationId: input.conversationId,
-                  userId: participantId,
-                  hidden: false,
-                  lastReadAt: now,
-                }
-              : {
-                  conversationId: input.conversationId,
-                  userId: participantId,
-                  hidden: false,
-                },
-        }),
-      ),
-    ]);
+    const baseParticipantIds = this.participantIdsFromConversation(conv);
+    await this.ensureVisibleStates(input.conversationId, baseParticipantIds, input.userId);
 
-    return this.formatMessage(input.userId, msg.id);
+    const primaryMessage = await this.formatMessage(input.userId, msg.id);
+    const deliveries: MessageDelivery[] = [
+      {
+        conversationId: input.conversationId,
+        message: primaryMessage,
+        participantIds: baseParticipantIds,
+      },
+    ];
+
+    if (conv.kind === 'BROADCAST') {
+      const targetIds = await this.resolveBroadcastTargetIds(conv);
+
+      for (const targetId of targetIds) {
+        const directConversation = await this.getOrCreateDirectConversation(input.userId, targetId);
+        const directMessage = await this.createStoredMessage({
+          conversationId: directConversation.id,
+          userId: input.userId,
+          body: body || null,
+          contentType,
+          attachmentUrl,
+          attachmentName,
+          attachmentMime,
+          attachmentSize,
+          replyToId: null,
+          broadcastListId: conv.id,
+          broadcastListTitle: conv.title ?? 'Lista de transmissão',
+        });
+
+        const directParticipantIds = this.participantIdsFromConversation(directConversation);
+        await this.ensureBroadcastDirectStates(
+          directConversation.id,
+          input.userId,
+          targetId,
+          directConversation.isNewConversation || directConversation.senderHidden === true,
+        );
+
+        deliveries.push({
+          conversationId: directConversation.id,
+          message: await this.formatMessage(targetId, directMessage.id),
+          participantIds: directParticipantIds,
+          notifyUserIds: [targetId],
+          syncUserIds: [targetId],
+          emitToConversationRoom: false,
+        });
+      }
+    }
+
+    return {
+      message: primaryMessage,
+      deliveries,
+    };
   }
 
   async getConversationParticipantIds(conversationId: string) {
     const conv = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { userAId: true, userBId: true },
+      select: {
+        userAId: true,
+        userBId: true,
+        participants: {
+          select: { userId: true },
+        },
+      },
     });
     if (!conv) return [];
-    return [conv.userAId, conv.userBId];
+    return this.participantIdsFromConversation(conv);
   }
 
   async list(userId: string, conversationId: string, cursor?: string, take?: string) {
     await this.assertMember(userId, conversationId);
     const state = await this.getConversationState(userId, conversationId);
+    const createdAt: Record<string, Date> = {};
+    if (state?.clearedAt) createdAt.gt = state.clearedAt;
+    if (state?.leftAt) createdAt.lte = state.leftAt;
 
     const pageSize = Math.min(Math.max(parseInt(take ?? '30', 10) || 30, 1), 100);
 
@@ -274,7 +700,7 @@ export class MessagesService {
         hiddenForUsers: {
           none: { userId },
         },
-        ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: pageSize,
@@ -292,6 +718,9 @@ export class MessagesService {
   async around(userId: string, conversationId: string, messageId: string, take?: string) {
     await this.assertMember(userId, conversationId);
     const state = await this.getConversationState(userId, conversationId);
+    const createdAtRange: Record<string, Date> = {};
+    if (state?.clearedAt) createdAtRange.gt = state.clearedAt;
+    if (state?.leftAt) createdAtRange.lte = state.leftAt;
 
     const takeN = Math.min(Math.max(parseInt(take ?? '60', 10) || 60, 3), 200);
     const half = Math.floor((takeN - 1) / 2);
@@ -305,7 +734,7 @@ export class MessagesService {
       throw new BadRequestException('Mensagem âncora não encontrada nesta conversa');
     }
 
-    if (state?.clearedAt && anchor.createdAt <= state.clearedAt) {
+    if ((state?.clearedAt && anchor.createdAt <= state.clearedAt) || (state?.leftAt && anchor.createdAt > state.leftAt)) {
       throw new BadRequestException('Mensagem âncora não encontrada nesta conversa');
     }
 
@@ -322,7 +751,7 @@ export class MessagesService {
       where: {
         conversationId,
         hiddenForUsers: { none: { userId } },
-        ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+        ...(Object.keys(createdAtRange).length ? { createdAt: createdAtRange } : {}),
         OR: [
           { createdAt: { lt: anchor.createdAt } },
           { AND: [{ createdAt: { equals: anchor.createdAt } }, { id: { lt: anchor.id } }] },
@@ -337,7 +766,7 @@ export class MessagesService {
       where: {
         conversationId,
         hiddenForUsers: { none: { userId } },
-        ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+        ...(Object.keys(createdAtRange).length ? { createdAt: createdAtRange } : {}),
         OR: [
           { createdAt: { gt: anchor.createdAt } },
           { AND: [{ createdAt: { equals: anchor.createdAt } }, { id: { gt: anchor.id } }] },
@@ -350,7 +779,16 @@ export class MessagesService {
 
     const ids = [...before.reverse().map((x) => x.id), anchor.id, ...after.map((x) => x.id)];
 
-    const items = await Promise.all(ids.map((id) => this.formatMessage(userId, id)));
+    const rows = await this.prisma.message.findMany({
+      where: { id: { in: ids } },
+      include: this.messageInclude(userId),
+    });
+
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const items = ids
+      .map((id) => byId.get(id))
+      .filter((row): row is NonNullable<typeof row> => !!row)
+      .map((row) => this.serializeMessage(row));
 
     return { ok: true, anchorId: anchor.id, items };
   }
@@ -358,6 +796,9 @@ export class MessagesService {
   async search(userId: string, conversationId: string, q?: string, take?: string) {
     await this.assertMember(userId, conversationId);
     const state = await this.getConversationState(userId, conversationId);
+    const createdAt: Record<string, Date> = {};
+    if (state?.clearedAt) createdAt.gt = state.clearedAt;
+    if (state?.leftAt) createdAt.lte = state.leftAt;
 
     const term = (q ?? '').trim();
     if (!term) throw new BadRequestException('Informe um termo para busca');
@@ -369,7 +810,7 @@ export class MessagesService {
         conversationId,
         deletedAt: null,
         hiddenForUsers: { none: { userId } },
-        ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
         OR: [
           { body: { contains: term, mode: 'insensitive' } },
           { attachmentName: { contains: term, mode: 'insensitive' } },
@@ -393,6 +834,9 @@ export class MessagesService {
   ) {
     await this.assertMember(userId, conversationId);
     const state = await this.getConversationState(userId, conversationId);
+    const createdAt: Record<string, Date> = {};
+    if (state?.clearedAt) createdAt.gt = state.clearedAt;
+    if (state?.leftAt) createdAt.lte = state.leftAt;
 
     const takeN = Math.min(Math.max(parseInt(take ?? '300', 10) || 300, 1), 1000);
 
@@ -401,8 +845,8 @@ export class MessagesService {
         conversationId,
         deletedAt: null,
         hiddenForUsers: { none: { userId } },
-        ...(state?.clearedAt ? { createdAt: { gt: state.clearedAt } } : {}),
-        contentType: { in: ['IMAGE', 'FILE'] },
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
+        contentType: { in: ['IMAGE', 'FILE', 'AUDIO'] },
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: takeN,
@@ -558,6 +1002,34 @@ export class MessagesService {
     return { conversationId, messageIds: rows.map((r) => r.id) };
   }
 
+  async removeRemovedAttachmentNotices(userId: string, conversationId: string) {
+    await this.assertMember(userId, conversationId);
+    const where = await this.visibleConversationMessagesWhere(userId, conversationId);
+
+    const rows = await this.prisma.message.findMany({
+      where: {
+        ...where,
+        deletedAt: { not: null },
+      },
+      select: { id: true, body: true },
+    });
+
+    const matchingIds = rows
+      .filter((row) => isAttachmentRemovalNoticeText(row.body))
+      .map((row) => row.id);
+
+    if (!matchingIds.length) {
+      return { conversationId, messageIds: [] as string[] };
+    }
+
+    await this.prisma.messageVisibility.createMany({
+      data: matchingIds.map((messageId) => ({ messageId, userId })),
+      skipDuplicates: true,
+    });
+
+    return { conversationId, messageIds: matchingIds };
+  }
+
   async clearConversation(userId: string, conversationId: string) {
     await this.assertMember(userId, conversationId);
 
@@ -567,6 +1039,56 @@ export class MessagesService {
       create: { conversationId, userId, clearedAt: new Date(), hidden: false },
     });
 
-    return { conversationId };
+    return { conversationId, keptFavorites: false as const, messageIds: [] as string[] };
+  }
+
+  async getClearConversationSummary(userId: string, conversationId: string) {
+    await this.assertMember(userId, conversationId);
+    const where = await this.visibleConversationMessagesWhere(userId, conversationId);
+
+    const [totalCount, favoriteCount] = await Promise.all([
+      this.prisma.message.count({ where }),
+      this.prisma.message.count({
+        where: {
+          ...where,
+          favorites: { some: { userId } },
+        },
+      }),
+    ]);
+
+    return { conversationId, totalCount, favoriteCount };
+  }
+
+  async clearConversationKeepingFavorites(userId: string, conversationId: string) {
+    await this.assertMember(userId, conversationId);
+    const where = await this.visibleConversationMessagesWhere(userId, conversationId);
+    const messagesToHide = await this.prisma.message.findMany({
+      where: {
+        ...where,
+        favorites: { none: { userId } },
+      },
+      select: { id: true },
+    });
+
+    if (messagesToHide.length) {
+      await this.prisma.messageVisibility.createMany({
+        data: messagesToHide.map((message) => ({ messageId: message.id, userId })),
+        skipDuplicates: true,
+      });
+    }
+
+    await this.prisma.conversationUserState.upsert({
+      where: { conversationId_userId: { conversationId, userId } },
+      update: { hidden: false },
+      create: { conversationId, userId, hidden: false },
+    });
+
+    return {
+      conversationId,
+      keptFavorites: true as const,
+      messageIds: messagesToHide.map((message) => message.id),
+    };
   }
 }
+
+

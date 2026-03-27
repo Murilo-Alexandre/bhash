@@ -30,6 +30,10 @@ declare global {
         conversationId?: string;
         messageId?: string;
       }) => Promise<{ ok: boolean; error?: string }>;
+      downloadFile: (payload: {
+        url: string;
+        filename: string;
+      }) => Promise<{ ok: boolean; path?: string; filename?: string; error?: string }>;
       consumeNotificationTarget: () => Promise<{
         conversationId: string;
         messageId?: string | null;

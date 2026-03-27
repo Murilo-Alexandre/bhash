@@ -151,6 +151,56 @@ function normalizeHttpUrl(value) {
   }
 }
 
+function sanitizeDownloadFilename(value) {
+  const raw = path.basename(String(value || "").trim());
+  const cleaned = raw.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
+  return cleaned || "arquivo";
+}
+
+async function uniqueDownloadPath(filename) {
+  const downloadsDir = app.getPath("downloads");
+  await fs.promises.mkdir(downloadsDir, { recursive: true });
+
+  const parsed = path.parse(filename);
+  let nextPath = path.join(downloadsDir, filename);
+  let counter = 1;
+
+  while (fs.existsSync(nextPath)) {
+    const suffix = ` (${counter})`;
+    nextPath = path.join(downloadsDir, `${parsed.name}${suffix}${parsed.ext}`);
+    counter += 1;
+  }
+
+  return nextPath;
+}
+
+async function downloadFileToDownloads(rawUrl, rawFilename) {
+  const downloadUrl = String(rawUrl || "").trim();
+  if (!downloadUrl) {
+    return { ok: false, error: "URL de download inválida." };
+  }
+
+  const filename = sanitizeDownloadFilename(rawFilename);
+  const savePath = await uniqueDownloadPath(filename);
+
+  try {
+    const response = await session.defaultSession.fetch(downloadUrl, {
+      method: "GET",
+      credentials: "include",
+    });
+
+    if (!response.ok) {
+      return { ok: false, error: `Falha ao baixar arquivo (HTTP ${response.status}).` };
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await fs.promises.writeFile(savePath, buffer);
+    return { ok: true, path: savePath, filename: path.basename(savePath) };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
+}
+
 function configuredHttpsHosts() {
   const hosts = new Set();
   for (const candidate of [config?.serverUrl, config?.updateUrl, DEFAULT_CONFIG.serverUrl, DEFAULT_CONFIG.updateUrl]) {
@@ -738,6 +788,10 @@ function setupIpc() {
 
   ipcMain.handle("desktop:notify", (_event, payload) => {
     return notifyNative(payload);
+  });
+
+  ipcMain.handle("desktop:download-file", async (_event, payload) => {
+    return downloadFileToDownloads(payload?.url, payload?.filename);
   });
 
   ipcMain.handle("desktop:consume-notification-target", () => {

@@ -1,5 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, MouseEvent as ReactMouseEvent } from "react";
+import { unzipSync } from "fflate";
+import readXlsxFile from "read-excel-file/browser";
 import type { Socket } from "socket.io-client";
 import { useAuth } from "../auth";
 import { useTheme } from "../theme";
@@ -18,6 +20,16 @@ type UserMini = {
   avatarUrl?: string | null;
   company?: { id: string; name: string } | null;
   department?: { id: string; name: string } | null;
+};
+
+type OrgMini = {
+  id: string;
+  name: string;
+};
+
+type BroadcastSource = {
+  id: string;
+  title: string;
 };
 
 type ReactionRaw = {
@@ -40,7 +52,7 @@ type ReactionItem = {
 type ReplyToMessage = {
   id: string;
   body?: string | null;
-  contentType?: "TEXT" | "IMAGE" | "FILE";
+  contentType?: "TEXT" | "IMAGE" | "FILE" | "AUDIO";
   attachmentUrl?: string | null;
   attachmentName?: string | null;
   attachmentMime?: string | null;
@@ -58,27 +70,48 @@ type Message = {
   conversationId: string;
   senderId: string;
   body?: string | null;
-  contentType?: "TEXT" | "IMAGE" | "FILE";
+  contentType?: "TEXT" | "IMAGE" | "FILE" | "AUDIO";
   attachmentUrl?: string | null;
   attachmentName?: string | null;
   attachmentMime?: string | null;
   attachmentSize?: number | null;
   replyToId?: string | null;
   deletedAt?: string | null;
+  broadcastSource?: BroadcastSource | null;
   sender: UserMini;
   replyTo?: ReplyToMessage | null;
   reactions?: ReactionRaw[];
   isFavorited?: boolean;
 };
 
+type ConversationKind = "DIRECT" | "GROUP" | "BROADCAST";
+
 type ConversationListItem = {
   id: string;
+  kind?: ConversationKind;
+  title?: string | null;
+  rawTitle?: string | null;
+  avatarUrl?: string | null;
   createdAt?: string;
   updatedAt?: string;
-  otherUser: UserMini;
+  createdById?: string | null;
+  createdBy?: UserMini | null;
+  otherUser?: UserMini | null;
+  participants?: UserMini[];
+  participantCount?: number;
+  broadcastTargets?: UserMini[];
+  targetCount?: number;
+  broadcastIncludeAllUsers?: boolean;
+  broadcastTargetCompanies?: OrgMini[];
+  broadcastTargetDepartments?: OrgMini[];
+  broadcastExcludedUsers?: UserMini[];
+  effectiveBroadcastTargets?: UserMini[];
+  availableBroadcastUsers?: UserMini[];
   lastMessage?: Message | null;
   unreadCount?: number;
   pinned?: boolean;
+  isCurrentParticipant?: boolean;
+  leftAt?: string | null;
 };
 
 type SearchHit = Message;
@@ -88,7 +121,7 @@ type MediaItem = Message;
 type GroupedMessageRow =
   | { kind: "sep"; label: string }
   | { kind: "unread" }
-  | { kind: "msg"; value: Message };
+  | { kind: "msg"; value: Message; startsSenderBlock: boolean };
 
 type DesktopNotificationTarget = {
   conversationId: string;
@@ -132,16 +165,14 @@ type UsersResponse = {
   items: UserMini[];
 };
 
-type DirectConversationResponse = {
+type ConversationMutationResponse = {
   ok: true;
-  conversation: {
-    id: string;
-    createdAt?: string;
-    updatedAt?: string;
-    userA: UserMini;
-    userB: UserMini;
-  };
+  conversation: ConversationListItem;
+  participantIds?: string[];
+  addedUserIds?: string[];
 };
+
+type CreatePickerMode = "direct" | "group" | "broadcast" | "group-members";
 
 type MessagesResponse = {
   ok: true;
@@ -169,9 +200,83 @@ type MediaRetentionPolicyResponse = {
   nextRunAt?: string | null;
 };
 
+type FavoriteDeletePrompt = {
+  ids: string[];
+  favoriteIds: string[];
+  totalCount: number;
+  favoriteCount: number;
+};
+
+type PendingMessageDeleteBatch = {
+  token: number;
+  ids: string[];
+  messages: Message[];
+  searchHits: SearchHit[];
+  profileMediaItems: MediaItem[];
+  imageViewerItems: MediaItem[];
+  conversationId: string | null;
+  expiresAt: number;
+};
+
+type ConversationClearSummaryResponse = {
+  ok: true;
+  conversationId: string;
+  totalCount: number;
+  favoriteCount: number;
+};
+
+type ConversationClearPrompt = {
+  conversationId: string;
+  conversationName: string;
+  totalCount: number;
+  favoriteCount: number;
+  messageIds: string[];
+  favoriteIds: string[];
+};
+
+type ConversationUiSnapshot = {
+  conversations: ConversationListItem[];
+  activeConv: ConversationListItem | null;
+  messages: Message[];
+  searchHits: SearchHit[];
+  profileMediaItems: MediaItem[];
+  imageViewerItems: MediaItem[];
+  newMsgsCount: number;
+  showJumpNew: boolean;
+  unreadAnchorMessageId: string | null;
+  showJumpUnread: boolean;
+  profileOpen: boolean;
+  searchOpen: boolean;
+};
+
+type PendingConversationHideBatch = {
+  token: number;
+  ids: string[];
+  snapshot: ConversationUiSnapshot;
+  expiresAt: number;
+};
+
+type PendingConversationClearBatch = {
+  token: number;
+  conversationId: string;
+  conversationName: string;
+  keepFavorites: boolean;
+  totalCount: number;
+  favoriteCount: number;
+  messageIds: string[];
+  favoriteIds: string[];
+  snapshot: ConversationUiSnapshot;
+  expiresAt: number;
+};
+
 type ProfileResponse = {
   ok: true;
   user: UserProfile;
+};
+
+type ConversationDetailsResponse = {
+  ok: true;
+  conversation: ConversationListItem;
 };
 
 type FavoriteResponse = {
@@ -350,6 +455,10 @@ const EMOJIS = [
 ];
 
 const QUICK_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const INITIAL_MESSAGES_PAGE_SIZE = 40;
+const OLDER_MESSAGES_PAGE_SIZE = 30;
+const MESSAGE_LIST_TOP_LOAD_THRESHOLD = 140;
+const MESSAGE_LIST_AUTOLOAD_THRESHOLD = 48;
 
 const PT_BR_COLLATOR = new Intl.Collator("pt-BR", {
   sensitivity: "base",
@@ -427,7 +536,117 @@ function formatBytes(bytes?: number | null) {
 const ATTACHMENT_MOJIBAKE_MARKERS = /[ÃÂ�]/u;
 const IMAGE_FILE_RE = /\.(png|jpe?g|webp|gif|bmp|svg|heic|heif|avif)([?#]|$)/i;
 const VIDEO_FILE_RE = /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|3gp|mpeg?|mpg|wmv)([?#]|$)/i;
+const AUDIO_FILE_RE = /\.(mp3|m4a|aac|wav|flac|oga|ogg|opus|weba|amr|mpga)([?#]|$)/i;
+const SPREADSHEET_FILE_RE = /\.(xlsx|xlsm|xls|csv|ods|fods)([?#]|$)/i;
+const SPREADSHEET_MIME_RE =
+  /(application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet|application\/vnd\.ms-excel\.sheet\.macroenabled\.12|application\/vnd\.ms-excel|application\/msexcel|application\/x-msexcel|application\/vnd\.oasis\.opendocument\.spreadsheet|application\/vnd\.oasis\.opendocument\.spreadsheet-flat-xml|text\/csv|application\/csv)/i;
+const LEGACY_XLS_FILE_RE = /\.xls([?#]|$)/i;
+const TEXT_DOCUMENT_FILE_RE = /\.(docx|docm|dotx|dotm|doc|odt|fodt|rtf|txt)([?#]|$)/i;
+const TEXT_DOCUMENT_MIME_RE =
+  /(application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/vnd\.ms-word\.document\.macroenabled\.12|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.template|application\/vnd\.ms-word\.template\.macroenabled\.12|application\/vnd\.oasis\.opendocument\.text|application\/vnd\.oasis\.opendocument\.text-flat-xml|application\/msword|application\/rtf|text\/rtf|text\/plain)/i;
+const PRESENTATION_FILE_RE = /\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|odp|fodp)([?#]|$)/i;
+const PRESENTATION_MIME_RE =
+  /(application\/vnd\.openxmlformats-officedocument\.presentationml\.presentation|application\/vnd\.ms-powerpoint\.presentation\.macroenabled\.12|application\/vnd\.openxmlformats-officedocument\.presentationml\.slideshow|application\/vnd\.ms-powerpoint\.slideshow\.macroenabled\.12|application\/vnd\.openxmlformats-officedocument\.presentationml\.template|application\/vnd\.ms-powerpoint\.template\.macroenabled\.12|application\/vnd\.oasis\.opendocument\.presentation|application\/vnd\.oasis\.opendocument\.presentation-flat-xml|application\/vnd\.ms-powerpoint)/i;
 const MAX_CHAT_ATTACHMENT_BYTES = 250 * 1024 * 1024;
+const SPREADSHEET_PREVIEW_MAX_ROWS = 5;
+const SPREADSHEET_PREVIEW_MAX_COLS = 5;
+const TEXT_DOCUMENT_PREVIEW_MAX_PARAGRAPHS = 7;
+const PRESENTATION_PREVIEW_MAX_POINTS = 5;
+const AUDIO_PLAYBACK_RATES = [1, 1.5, 2] as const;
+const AUDIO_PLAYBACK_RATE_STORAGE_KEY = "bhash:audio-playback-rate";
+const AUDIO_PLAYBACK_RATE_EVENT = "bhash:audio-playback-rate-change";
+const CONVERSATION_READ_MARKERS_STORAGE_KEY = "bhash:conversation-read-markers";
+type MediaPreviewLayout = "landscape" | "square" | "portrait";
+
+type SpreadsheetCellValue = string | number | boolean | Date | null;
+
+type SpreadsheetPreviewData = {
+  label: string;
+  rows: string[][];
+  columnCount: number;
+  fallback?: boolean;
+};
+
+const spreadsheetPreviewCache = new Map<string, SpreadsheetPreviewData>();
+const spreadsheetPreviewPending = new Map<string, Promise<SpreadsheetPreviewData>>();
+let legacySpreadsheetReaderPromise: Promise<typeof import("@e965/xlsx")> | null = null;
+const optimisticAudioMessageIds = new Set<string>();
+
+type TextDocumentPreviewData = {
+  label: string;
+  paragraphs: string[];
+  fallback?: boolean;
+};
+
+const textDocumentPreviewCache = new Map<string, TextDocumentPreviewData>();
+const textDocumentPreviewPending = new Map<string, Promise<TextDocumentPreviewData>>();
+
+type PresentationPreviewData = {
+  label: string;
+  title: string;
+  bullets: string[];
+  slideCount: number;
+  fallback?: boolean;
+};
+
+const presentationPreviewCache = new Map<string, PresentationPreviewData>();
+const presentationPreviewPending = new Map<string, Promise<PresentationPreviewData>>();
+const mediaPreviewLayoutCache = new Map<string, MediaPreviewLayout>();
+const mediaPreviewLayoutPending = new Map<string, Promise<MediaPreviewLayout>>();
+
+function classifyMediaPreviewLayout(width?: number, height?: number): MediaPreviewLayout {
+  if (!width || !height) return "square";
+  const ratio = width / height;
+  if (!Number.isFinite(ratio) || ratio <= 0) return "square";
+  if (ratio >= 1.2) return "landscape";
+  if (ratio <= 0.85) return "portrait";
+  return "square";
+}
+
+function loadImagePreviewLayout(url: string) {
+  return new Promise<MediaPreviewLayout>((resolve) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => resolve(classifyMediaPreviewLayout(img.naturalWidth, img.naturalHeight));
+    img.onerror = () => resolve("square");
+    img.src = url;
+  });
+}
+
+function loadVideoPreviewLayout(url: string) {
+  return new Promise<MediaPreviewLayout>((resolve) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.onloadedmetadata = () => resolve(classifyMediaPreviewLayout(video.videoWidth, video.videoHeight));
+    video.onerror = () => resolve("landscape");
+    video.src = url;
+  });
+}
+
+async function loadMediaPreviewLayout(url: string, isVideo: boolean): Promise<MediaPreviewLayout> {
+  const cached = mediaPreviewLayoutCache.get(url);
+  if (cached) return cached;
+  const pending = mediaPreviewLayoutPending.get(url);
+  if (pending) return pending;
+
+  const loader = (isVideo ? loadVideoPreviewLayout(url) : loadImagePreviewLayout(url))
+    .then((layout) => {
+      mediaPreviewLayoutCache.set(url, layout);
+      mediaPreviewLayoutPending.delete(url);
+      return layout;
+    })
+    .catch(() => {
+      mediaPreviewLayoutPending.delete(url);
+      const fallback = isVideo ? "landscape" : "square";
+      mediaPreviewLayoutCache.set(url, fallback);
+      return fallback;
+    });
+
+  mediaPreviewLayoutPending.set(url, loader);
+  return loader;
+}
 
 function attachmentMojibakeScore(value: string) {
   let score = 0;
@@ -467,22 +686,98 @@ function isPdfAttachment(message: Partial<Message>) {
   return mime.includes("pdf") || name.endsWith(".pdf") || url.includes(".pdf");
 }
 
-function isImageAttachment(message: Partial<Message>) {
+function isSpreadsheetAttachment(message: Partial<Message>) {
+  if (message.contentType !== "FILE") return false;
   const mime = String(message.attachmentMime ?? "").toLowerCase();
   const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
   const url = String(message.attachmentUrl ?? "").toLowerCase();
-  return message.contentType === "IMAGE" || mime.startsWith("image/") || IMAGE_FILE_RE.test(name) || IMAGE_FILE_RE.test(url);
+  return SPREADSHEET_MIME_RE.test(mime) || SPREADSHEET_FILE_RE.test(name) || SPREADSHEET_FILE_RE.test(url);
 }
 
-function isVideoAttachment(message: Partial<Message>) {
+function isTextDocumentAttachment(message: Partial<Message>) {
+  if (message.contentType !== "FILE") return false;
+  if (isPdfAttachment(message) || isSpreadsheetAttachment(message)) return false;
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return TEXT_DOCUMENT_MIME_RE.test(mime) || TEXT_DOCUMENT_FILE_RE.test(name) || TEXT_DOCUMENT_FILE_RE.test(url);
+}
+
+function isPresentationAttachment(message: Partial<Message>) {
+  if (message.contentType !== "FILE") return false;
+  if (isPdfAttachment(message) || isSpreadsheetAttachment(message) || isTextDocumentAttachment(message)) {
+    return false;
+  }
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return PRESENTATION_MIME_RE.test(mime) || PRESENTATION_FILE_RE.test(name) || PRESENTATION_FILE_RE.test(url);
+}
+
+function attachmentStorageKind(message: Partial<Message>) {
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  if (url.includes("/chat-files/")) return "file";
+  if (url.includes("/chat-media/")) return "media";
+  return null;
+}
+
+function hasImageFileSignature(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return mime.startsWith("image/") || IMAGE_FILE_RE.test(name) || IMAGE_FILE_RE.test(url);
+}
+
+function hasVideoFileSignature(message: Partial<Message>) {
   const mime = String(message.attachmentMime ?? "").toLowerCase();
   const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
   const url = String(message.attachmentUrl ?? "").toLowerCase();
   return mime.startsWith("video/") || VIDEO_FILE_RE.test(name) || VIDEO_FILE_RE.test(url);
 }
 
+function hasAudioFileSignature(message: Partial<Message>) {
+  const mime = String(message.attachmentMime ?? "").toLowerCase();
+  const name = normalizeAttachmentDisplayName(message.attachmentName).toLowerCase();
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return mime.startsWith("audio/") || AUDIO_FILE_RE.test(name) || AUDIO_FILE_RE.test(url);
+}
+
+function isImageAttachment(message: Partial<Message>) {
+  const storageKind = attachmentStorageKind(message);
+  if (storageKind === "file") return false;
+  if (message.contentType === "IMAGE") return true;
+  if (message.contentType === "FILE" || message.contentType === "AUDIO") return false;
+  return hasImageFileSignature(message);
+}
+
+function isVideoAttachment(message: Partial<Message>) {
+  const storageKind = attachmentStorageKind(message);
+  if (storageKind === "file") return false;
+  if (message.contentType === "FILE" || message.contentType === "AUDIO") return false;
+  return hasVideoFileSignature(message);
+}
+
 function isMediaAttachment(message: Partial<Message>) {
   return isVideoAttachment(message) || isImageAttachment(message);
+}
+
+function isAudioMessageAttachment(message: Partial<Message>) {
+  if (message.contentType === "AUDIO") return true;
+  if (message.id && optimisticAudioMessageIds.has(message.id) && hasAudioFileSignature(message)) return true;
+  const url = String(message.attachmentUrl ?? "").toLowerCase();
+  return url.includes("/chat-audio/") && hasAudioFileSignature(message);
+}
+
+function isAudioDocumentAttachment(message: Partial<Message>) {
+  return message.contentType === "FILE" && hasAudioFileSignature(message) && !isAudioMessageAttachment(message);
+}
+
+function isImageDocumentPreview(message: Partial<Message>) {
+  return message.contentType === "FILE" && hasImageFileSignature(message);
+}
+
+function isVideoDocumentPreview(message: Partial<Message>) {
+  return message.contentType === "FILE" && hasVideoFileSignature(message);
 }
 
 function isVideoFileLike(file?: File | null) {
@@ -503,6 +798,13 @@ function isMediaFileLike(file?: File | null) {
   return isVideoFileLike(file) || isImageFileLike(file);
 }
 
+function isAudioFileLike(file?: File | null) {
+  if (!file) return false;
+  const type = String(file.type ?? "").toLowerCase();
+  const name = String(file.name ?? "").toLowerCase();
+  return type.startsWith("audio/") || AUDIO_FILE_RE.test(name);
+}
+
 function buildPdfPreviewUrl(raw?: string | null) {
   const absolute = toAbsoluteUrl(raw);
   if (!absolute) return null;
@@ -510,11 +812,1283 @@ function buildPdfPreviewUrl(raw?: string | null) {
   return `${base}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`;
 }
 
+function buildSpreadsheetPreviewLabel(value?: string | null) {
+  const normalized = normalizeAttachmentDisplayName(value);
+  const label = normalized ? normalized.replace(/\.[^.]+$/, "").trim() : "";
+  return label || "Planilha";
+}
+
+function buildTextDocumentPreviewLabel(value?: string | null) {
+  const normalized = normalizeAttachmentDisplayName(value);
+  const label = normalized ? normalized.replace(/\.[^.]+$/, "").trim() : "";
+  return label || "Documento";
+}
+
+function buildPresentationPreviewLabel(value?: string | null) {
+  const normalized = normalizeAttachmentDisplayName(value);
+  const label = normalized ? normalized.replace(/\.[^.]+$/, "").trim() : "";
+  return label || "Apresentacao";
+}
+
+function formatSpreadsheetCellValue(value: SpreadsheetCellValue) {
+  if (value == null) return "";
+  if (value instanceof Date) return value.toLocaleDateString("pt-BR");
+  const normalized = String(value).replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > 36 ? `${normalized.slice(0, 33)}...` : normalized;
+}
+
+function buildSpreadsheetFallbackPreview(
+  attachmentName?: string | null,
+  message = "Previa indisponivel"
+): SpreadsheetPreviewData {
+  return {
+    label: buildSpreadsheetPreviewLabel(attachmentName),
+    columnCount: 4,
+    rows: [
+      [message, "", "", ""],
+      ["", "", "", ""],
+      ["", "", "", ""],
+      ["", "", "", ""],
+    ],
+    fallback: true,
+  };
+}
+
+function buildSpreadsheetPreviewFromRows(
+  sourceRows: SpreadsheetCellValue[][],
+  attachmentName?: string | null
+): SpreadsheetPreviewData {
+  const previewRows = sourceRows
+    .map((row) => row.map((cell) => formatSpreadsheetCellValue(cell)))
+    .filter((row) => row.some((cell) => cell.length > 0))
+    .slice(0, SPREADSHEET_PREVIEW_MAX_ROWS);
+
+  if (!previewRows.length) {
+    return buildSpreadsheetFallbackPreview(attachmentName, "Planilha vazia");
+  }
+
+  const widestRow = previewRows.reduce((max, row) => Math.max(max, row.length), 0);
+  const columnCount = Math.max(4, Math.min(SPREADSHEET_PREVIEW_MAX_COLS, widestRow || 1));
+
+  return {
+    label: buildSpreadsheetPreviewLabel(attachmentName),
+    columnCount,
+    rows: previewRows.map((row) =>
+      Array.from({ length: columnCount }, (_, index) => row[index] ?? "")
+    ),
+  };
+}
+
+async function getLegacySpreadsheetReader() {
+  if (!legacySpreadsheetReaderPromise) {
+    legacySpreadsheetReaderPromise = Promise.all([
+      import("@e965/xlsx"),
+      import("@e965/xlsx/dist/cpexcel"),
+    ]).then(([xlsx, cptable]) => {
+      xlsx.set_cptable(cptable);
+      return xlsx;
+    });
+  }
+
+  return legacySpreadsheetReaderPromise;
+}
+
+async function parseLegacyXlsPreviewRows(buffer: ArrayBuffer) {
+  const xlsx = await getLegacySpreadsheetReader();
+  const workbook = xlsx.read(buffer, {
+    type: "array",
+    dense: true,
+    cellText: true,
+    cellDates: true,
+    sheetRows: SPREADSHEET_PREVIEW_MAX_ROWS,
+  });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) return [] as SpreadsheetCellValue[][];
+  const firstSheet = workbook.Sheets[firstSheetName];
+  if (!firstSheet) return [] as SpreadsheetCellValue[][];
+
+  const rows = xlsx.utils.sheet_to_json<SpreadsheetCellValue[]>(firstSheet, {
+    header: 1,
+    raw: false,
+    blankrows: false,
+    defval: "",
+  });
+
+  return rows
+    .slice(0, SPREADSHEET_PREVIEW_MAX_ROWS)
+    .map((row) => row.slice(0, SPREADSHEET_PREVIEW_MAX_COLS));
+}
+
+function detectCsvDelimiter(line: string) {
+  const candidates = [",", ";", "\t"];
+  let best = ",";
+  let bestScore = -1;
+  for (const delimiter of candidates) {
+    const score = line.split(delimiter).length;
+    if (score > bestScore) {
+      best = delimiter;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function parseCsvPreviewRows(text: string) {
+  const lines = text
+    .replace(/^\uFEFF/, "")
+    .split(/\r\n|\n|\r/g)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, SPREADSHEET_PREVIEW_MAX_ROWS);
+
+  if (!lines.length) return [] as SpreadsheetCellValue[][];
+
+  const delimiter = detectCsvDelimiter(lines[0] ?? ",");
+  return lines.map((line) =>
+    line
+      .split(delimiter)
+      .slice(0, SPREADSHEET_PREVIEW_MAX_COLS)
+      .map((cell) => cell.trim())
+  );
+}
+
+function getXmlAttrByLocalName(element: Element, localName: string) {
+  for (const attribute of Array.from(element.attributes)) {
+    if (attribute.localName === localName) return attribute.value;
+  }
+  return null;
+}
+
+function normalizeSpreadsheetText(value?: string | null) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function extractOdsCellValue(cell: Element): SpreadsheetCellValue {
+  if (cell.localName === "covered-table-cell") return "";
+
+  const paragraphs = Array.from(cell.children)
+    .filter((child): child is Element => child.nodeType === 1 && child.localName === "p")
+    .map((paragraph) => normalizeSpreadsheetText(paragraph.textContent))
+    .filter(Boolean);
+
+  const valueType = getXmlAttrByLocalName(cell, "value-type") ?? "";
+  if (valueType === "float" || valueType === "currency" || valueType === "percentage") {
+    return getXmlAttrByLocalName(cell, "value") ?? paragraphs.join(" ");
+  }
+  if (valueType === "boolean") {
+    return getXmlAttrByLocalName(cell, "boolean-value") ?? paragraphs.join(" ");
+  }
+  if (valueType === "date") {
+    return getXmlAttrByLocalName(cell, "date-value") ?? paragraphs.join(" ");
+  }
+  if (valueType === "time") {
+    return getXmlAttrByLocalName(cell, "time-value") ?? paragraphs.join(" ");
+  }
+  if (valueType === "string") {
+    return paragraphs.join(" ");
+  }
+
+  const stringValue = getXmlAttrByLocalName(cell, "string-value");
+  if (stringValue) return stringValue;
+  if (paragraphs.length) return paragraphs.join(" ");
+  return normalizeSpreadsheetText(cell.textContent);
+}
+
+function parseOdsPreviewRowsFromXml(xmlText: string) {
+  if (typeof DOMParser === "undefined") return [] as SpreadsheetCellValue[][];
+
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (xml.getElementsByTagName("parsererror").length) return [] as SpreadsheetCellValue[][];
+
+  const firstSheet = Array.from(xml.getElementsByTagName("*")).find((node) => node.localName === "table");
+  if (!firstSheet) return [] as SpreadsheetCellValue[][];
+
+  const rows: SpreadsheetCellValue[][] = [];
+  const rowElements = Array.from(firstSheet.children).filter(
+    (child): child is Element => child.nodeType === 1 && child.localName === "table-row"
+  );
+
+  for (const rowElement of rowElements) {
+    const rowRepeatRaw = Number.parseInt(getXmlAttrByLocalName(rowElement, "number-rows-repeated") ?? "1", 10);
+    const rowRepeat = Number.isFinite(rowRepeatRaw) && rowRepeatRaw > 0 ? rowRepeatRaw : 1;
+    const values: SpreadsheetCellValue[] = [];
+
+    const cellElements = Array.from(rowElement.children).filter(
+      (child): child is Element =>
+        child.nodeType === 1 && (child.localName === "table-cell" || child.localName === "covered-table-cell")
+    );
+
+    for (const cell of cellElements) {
+      const columnRepeatRaw = Number.parseInt(getXmlAttrByLocalName(cell, "number-columns-repeated") ?? "1", 10);
+      const columnRepeat = Number.isFinite(columnRepeatRaw) && columnRepeatRaw > 0 ? columnRepeatRaw : 1;
+      const value = extractOdsCellValue(cell);
+
+      for (let index = 0; index < columnRepeat && values.length < SPREADSHEET_PREVIEW_MAX_COLS; index += 1) {
+        values.push(value);
+      }
+
+      if (values.length >= SPREADSHEET_PREVIEW_MAX_COLS) break;
+    }
+
+    for (let index = 0; index < rowRepeat && rows.length < SPREADSHEET_PREVIEW_MAX_ROWS; index += 1) {
+      rows.push([...values]);
+    }
+
+    if (rows.length >= SPREADSHEET_PREVIEW_MAX_ROWS) break;
+  }
+
+  return rows;
+}
+
+function parseOdsPreviewRowsFromArchive(buffer: ArrayBuffer) {
+  try {
+    const archive = unzipSync(new Uint8Array(buffer));
+    const contentXml = archive["content.xml"];
+    if (!contentXml) return [] as SpreadsheetCellValue[][];
+    const xmlText = new TextDecoder("utf-8").decode(contentXml);
+    return parseOdsPreviewRowsFromXml(xmlText);
+  } catch {
+    return [] as SpreadsheetCellValue[][];
+  }
+}
+
+async function loadSpreadsheetPreview(
+  rawUrl?: string | null,
+  attachmentName?: string | null,
+  attachmentMime?: string | null
+) {
+  const absolute = toAbsoluteUrl(rawUrl);
+  if (!absolute) return buildSpreadsheetFallbackPreview(attachmentName);
+  const cached = spreadsheetPreviewCache.get(absolute);
+  if (cached) return cached;
+
+  const pending = spreadsheetPreviewPending.get(absolute);
+  if (pending) return pending;
+
+  const promise = (async () => {
+    const lowerMime = String(attachmentMime ?? "").toLowerCase();
+    const lowerName = normalizeAttachmentDisplayName(attachmentName).toLowerCase();
+    const lowerUrl = absolute.toLowerCase();
+    const isCsv = lowerMime.includes("csv") || lowerName.endsWith(".csv") || lowerUrl.includes(".csv");
+    const isLegacyXls =
+      (lowerMime.includes("vnd.ms-excel") ||
+        lowerMime.includes("application/msexcel") ||
+        lowerMime.includes("application/x-msexcel") ||
+        LEGACY_XLS_FILE_RE.test(lowerName) ||
+        LEGACY_XLS_FILE_RE.test(lowerUrl)) &&
+      !lowerName.endsWith(".xlsx") &&
+      !lowerName.endsWith(".xlsm") &&
+      !lowerUrl.includes(".xlsx") &&
+      !lowerUrl.includes(".xlsm");
+    const isFlatOds =
+      lowerMime.includes("spreadsheet-flat-xml") ||
+      lowerName.endsWith(".fods") ||
+      lowerUrl.includes(".fods");
+    const isOds =
+      lowerMime.includes("vnd.oasis.opendocument.spreadsheet") ||
+      lowerName.endsWith(".ods") ||
+      lowerUrl.includes(".ods");
+
+    try {
+      const response = await fetch(absolute, { credentials: "include" });
+      if (!response.ok) {
+        return buildSpreadsheetFallbackPreview(attachmentName);
+      }
+
+      if (isCsv) {
+        const text = await response.text();
+        return buildSpreadsheetPreviewFromRows(parseCsvPreviewRows(text), attachmentName);
+      }
+
+      if (isFlatOds) {
+        const xmlText = await response.text();
+        return buildSpreadsheetPreviewFromRows(parseOdsPreviewRowsFromXml(xmlText), attachmentName);
+      }
+
+      if (isOds) {
+        const buffer = await response.arrayBuffer();
+        return buildSpreadsheetPreviewFromRows(parseOdsPreviewRowsFromArchive(buffer), attachmentName);
+      }
+
+      if (isLegacyXls) {
+        const buffer = await response.arrayBuffer();
+        return buildSpreadsheetPreviewFromRows(await parseLegacyXlsPreviewRows(buffer), attachmentName);
+      }
+
+      const blob = await response.blob();
+      const rows = (await readXlsxFile(blob)) as SpreadsheetCellValue[][];
+      return buildSpreadsheetPreviewFromRows(rows, attachmentName);
+    } catch {
+      return buildSpreadsheetFallbackPreview(attachmentName);
+    }
+  })();
+
+  spreadsheetPreviewPending.set(absolute, promise);
+
+  try {
+    const resolved = await promise;
+    spreadsheetPreviewCache.set(absolute, resolved);
+    return resolved;
+  } finally {
+    spreadsheetPreviewPending.delete(absolute);
+  }
+}
+
+function spreadsheetColumnLabel(index: number) {
+  let label = "";
+  let current = index + 1;
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    current = Math.floor((current - 1) / 26);
+  }
+  return label;
+}
+
+function normalizeDocumentParagraphText(value?: string | null) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/\u00A0/g, " ")
+    .trim();
+}
+
+function buildTextDocumentFallbackPreview(
+  attachmentName?: string | null,
+  message = "Previa indisponivel"
+): TextDocumentPreviewData {
+  return {
+    label: buildTextDocumentPreviewLabel(attachmentName),
+    paragraphs: [message],
+    fallback: true,
+  };
+}
+
+function buildTextDocumentPreviewFromParagraphs(
+  paragraphs: string[],
+  attachmentName?: string | null
+): TextDocumentPreviewData {
+  const normalized = paragraphs
+    .map((paragraph) => normalizeDocumentParagraphText(paragraph))
+    .filter(Boolean)
+    .slice(0, TEXT_DOCUMENT_PREVIEW_MAX_PARAGRAPHS);
+
+  if (!normalized.length) {
+    return buildTextDocumentFallbackPreview(attachmentName, "Documento vazio");
+  }
+
+  return {
+    label: buildTextDocumentPreviewLabel(attachmentName),
+    paragraphs: normalized,
+  };
+}
+
+type PresentationSlidePreview = {
+  title: string;
+  bullets: string[];
+};
+
+function buildPresentationFallbackPreview(
+  attachmentName?: string | null,
+  message = "Previa indisponivel"
+): PresentationPreviewData {
+  return {
+    label: buildPresentationPreviewLabel(attachmentName),
+    title: "Apresentacao",
+    bullets: [message],
+    slideCount: 1,
+    fallback: true,
+  };
+}
+
+function buildPresentationPreviewFromSlides(
+  slides: PresentationSlidePreview[],
+  attachmentName?: string | null
+): PresentationPreviewData {
+  const usableSlides = slides.filter((slide) => slide.title || slide.bullets.length);
+  if (!usableSlides.length) {
+    return buildPresentationFallbackPreview(attachmentName, "Apresentacao vazia");
+  }
+
+  const firstSlide = usableSlides[0];
+  const bullets = firstSlide.bullets.filter(Boolean).slice(0, PRESENTATION_PREVIEW_MAX_POINTS);
+
+  return {
+    label: buildPresentationPreviewLabel(attachmentName),
+    title: firstSlide.title || "Apresentacao",
+    bullets,
+    slideCount: usableSlides.length,
+  };
+}
+
+function extractWordParagraphText(paragraph: Element): string {
+  let result = "";
+  const stack = Array.from(paragraph.childNodes).reverse();
+
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    if (node.nodeType !== 1) continue;
+    const element = node as Element;
+    if (element.localName === "t") {
+      result += element.textContent ?? "";
+      continue;
+    }
+    if (element.localName === "tab") {
+      result += "    ";
+      continue;
+    }
+    if (element.localName === "br" || element.localName === "cr") {
+      result += " ";
+      continue;
+    }
+    stack.push(...Array.from(element.childNodes).reverse());
+  }
+
+  return normalizeDocumentParagraphText(result);
+}
+
+function parseDocxPreviewParagraphsFromXml(xmlText: string) {
+  if (typeof DOMParser === "undefined") return [] as string[];
+
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (xml.getElementsByTagName("parsererror").length) return [] as string[];
+
+  return Array.from(xml.getElementsByTagName("*"))
+    .filter((node) => node.localName === "p")
+    .map((paragraph) => extractWordParagraphText(paragraph))
+    .filter(Boolean)
+    .slice(0, TEXT_DOCUMENT_PREVIEW_MAX_PARAGRAPHS);
+}
+
+function extractOpenTextParagraphsFromXml(xmlText: string) {
+  if (typeof DOMParser === "undefined") return [] as string[];
+
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (xml.getElementsByTagName("parsererror").length) return [] as string[];
+
+  return Array.from(xml.getElementsByTagName("*"))
+    .filter((node) => node.localName === "p" || node.localName === "h")
+    .map((node) => normalizeDocumentParagraphText(node.textContent))
+    .filter(Boolean)
+    .slice(0, TEXT_DOCUMENT_PREVIEW_MAX_PARAGRAPHS);
+}
+
+function extractPresentationParagraphText(paragraph: Element) {
+  let result = "";
+  const stack = Array.from(paragraph.childNodes).reverse();
+
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    if (node.nodeType !== 1) continue;
+    const element = node as Element;
+    if (element.localName === "t") {
+      result += element.textContent ?? "";
+      continue;
+    }
+    if (element.localName === "tab") {
+      result += "    ";
+      continue;
+    }
+    if (element.localName === "br") {
+      result += " ";
+      continue;
+    }
+    stack.push(...Array.from(element.childNodes).reverse());
+  }
+
+  return normalizeDocumentParagraphText(result);
+}
+
+function buildPresentationSlideFromParagraphs(paragraphs: string[]): PresentationSlidePreview {
+  const normalized = paragraphs.map((paragraph) => normalizeDocumentParagraphText(paragraph)).filter(Boolean);
+  return {
+    title: normalized[0] ?? "",
+    bullets: normalized.slice(1, 1 + PRESENTATION_PREVIEW_MAX_POINTS),
+  };
+}
+
+function parsePptSlideFromXml(xmlText: string): PresentationSlidePreview | null {
+  if (typeof DOMParser === "undefined") return null;
+
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (xml.getElementsByTagName("parsererror").length) return null;
+
+  const paragraphs = Array.from(xml.getElementsByTagName("*"))
+    .filter((node) => node.localName === "p")
+    .map((paragraph) => extractPresentationParagraphText(paragraph))
+    .filter(Boolean);
+
+  if (!paragraphs.length) return null;
+  return buildPresentationSlideFromParagraphs(paragraphs);
+}
+
+function parsePptxSlidesFromArchive(buffer: ArrayBuffer) {
+  try {
+    const archive = unzipSync(new Uint8Array(buffer));
+    const slideEntries = Object.keys(archive)
+      .filter((path) => /^ppt\/slides\/slide\d+\.xml$/i.test(path))
+      .sort((a, b) => {
+        const aIndex = Number.parseInt(a.match(/slide(\d+)\.xml/i)?.[1] ?? "0", 10);
+        const bIndex = Number.parseInt(b.match(/slide(\d+)\.xml/i)?.[1] ?? "0", 10);
+        return aIndex - bIndex;
+      });
+
+    return slideEntries
+      .map((entry) => {
+        const xmlText = new TextDecoder("utf-8").decode(archive[entry]);
+        return parsePptSlideFromXml(xmlText);
+      })
+      .filter((slide): slide is PresentationSlidePreview => !!slide);
+  } catch {
+    return [] as PresentationSlidePreview[];
+  }
+}
+
+function parseOpenPresentationSlidesFromXml(xmlText: string) {
+  if (typeof DOMParser === "undefined") return [] as PresentationSlidePreview[];
+
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (xml.getElementsByTagName("parsererror").length) return [] as PresentationSlidePreview[];
+
+  return Array.from(xml.getElementsByTagName("*"))
+    .filter((node) => node.localName === "page")
+    .map((page) => {
+      const paragraphs = Array.from(page.getElementsByTagName("*"))
+        .filter((node) => node.localName === "p" || node.localName === "h")
+        .map((node) => normalizeDocumentParagraphText(node.textContent))
+        .filter(Boolean);
+
+      return paragraphs.length ? buildPresentationSlideFromParagraphs(paragraphs) : null;
+    })
+    .filter((slide): slide is PresentationSlidePreview => !!slide);
+}
+
+function parseOdpSlidesFromArchive(buffer: ArrayBuffer) {
+  try {
+    const archive = unzipSync(new Uint8Array(buffer));
+    const contentXml = archive["content.xml"];
+    if (!contentXml) return [] as PresentationSlidePreview[];
+    const xmlText = new TextDecoder("utf-8").decode(contentXml);
+    return parseOpenPresentationSlidesFromXml(xmlText);
+  } catch {
+    return [] as PresentationSlidePreview[];
+  }
+}
+
+function parseRtfPreviewParagraphs(text: string) {
+  const decodedHex = text.replace(/\\'([0-9a-fA-F]{2})/g, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  const normalized = decodedHex
+    .replace(/\\par[d]?/gi, "\n")
+    .replace(/\\line/gi, "\n")
+    .replace(/\\tab/gi, "    ")
+    .replace(/\\u-?\d+\??/g, " ")
+    .replace(/\\[a-z]+\d* ?/gi, " ")
+    .replace(/[{}]/g, " ")
+    .replace(/\\\\/g, "\\");
+
+  return normalized
+    .split(/\r\n|\n|\r/g)
+    .map((line) => normalizeDocumentParagraphText(line))
+    .filter(Boolean)
+    .slice(0, TEXT_DOCUMENT_PREVIEW_MAX_PARAGRAPHS);
+}
+
+function parsePlainTextPreviewParagraphs(text: string) {
+  return text
+    .replace(/^\uFEFF/, "")
+    .split(/\r\n|\n|\r/g)
+    .map((line) => normalizeDocumentParagraphText(line))
+    .filter(Boolean)
+    .slice(0, TEXT_DOCUMENT_PREVIEW_MAX_PARAGRAPHS);
+}
+
+function parseDocxPreviewFromArchive(buffer: ArrayBuffer) {
+  try {
+    const archive = unzipSync(new Uint8Array(buffer));
+    const documentXml = archive["word/document.xml"];
+    if (!documentXml) return [] as string[];
+    const xmlText = new TextDecoder("utf-8").decode(documentXml);
+    return parseDocxPreviewParagraphsFromXml(xmlText);
+  } catch {
+    return [] as string[];
+  }
+}
+
+function parseOdtPreviewFromArchive(buffer: ArrayBuffer) {
+  try {
+    const archive = unzipSync(new Uint8Array(buffer));
+    const contentXml = archive["content.xml"];
+    if (!contentXml) return [] as string[];
+    const xmlText = new TextDecoder("utf-8").decode(contentXml);
+    return extractOpenTextParagraphsFromXml(xmlText);
+  } catch {
+    return [] as string[];
+  }
+}
+
+async function loadTextDocumentPreview(
+  rawUrl?: string | null,
+  attachmentName?: string | null,
+  attachmentMime?: string | null
+) {
+  const absolute = toAbsoluteUrl(rawUrl);
+  if (!absolute) return buildTextDocumentFallbackPreview(attachmentName);
+  const cached = textDocumentPreviewCache.get(absolute);
+  if (cached) return cached;
+
+  const pending = textDocumentPreviewPending.get(absolute);
+  if (pending) return pending;
+
+  const promise = (async () => {
+    const lowerMime = String(attachmentMime ?? "").toLowerCase();
+    const lowerName = normalizeAttachmentDisplayName(attachmentName).toLowerCase();
+    const lowerUrl = absolute.toLowerCase();
+    const isPlainText = lowerMime.includes("text/plain") || lowerName.endsWith(".txt") || lowerUrl.includes(".txt");
+    const isRtf =
+      lowerMime.includes("rtf") || lowerName.endsWith(".rtf") || lowerUrl.includes(".rtf");
+    const isFlatOdt =
+      lowerMime.includes("text-flat-xml") || lowerName.endsWith(".fodt") || lowerUrl.includes(".fodt");
+    const isOdt =
+      lowerMime.includes("vnd.oasis.opendocument.text") || lowerName.endsWith(".odt") || lowerUrl.includes(".odt");
+    const isDocxFamily =
+      lowerMime.includes("wordprocessingml") ||
+      lowerMime.includes("ms-word.document.macroenabled.12") ||
+      lowerName.endsWith(".docx") ||
+      lowerName.endsWith(".docm") ||
+      lowerName.endsWith(".dotx") ||
+      lowerName.endsWith(".dotm") ||
+      lowerUrl.includes(".docx") ||
+      lowerUrl.includes(".docm") ||
+      lowerUrl.includes(".dotx") ||
+      lowerUrl.includes(".dotm");
+    const isLegacyDoc =
+      lowerMime.includes("application/msword") || lowerName.endsWith(".doc") || lowerUrl.includes(".doc");
+
+    try {
+      const response = await fetch(absolute, { credentials: "include" });
+      if (!response.ok) {
+        return buildTextDocumentFallbackPreview(attachmentName);
+      }
+
+      if (isPlainText) {
+        const text = await response.text();
+        return buildTextDocumentPreviewFromParagraphs(parsePlainTextPreviewParagraphs(text), attachmentName);
+      }
+
+      if (isRtf) {
+        const text = await response.text();
+        return buildTextDocumentPreviewFromParagraphs(parseRtfPreviewParagraphs(text), attachmentName);
+      }
+
+      if (isFlatOdt) {
+        const xmlText = await response.text();
+        return buildTextDocumentPreviewFromParagraphs(extractOpenTextParagraphsFromXml(xmlText), attachmentName);
+      }
+
+      if (isOdt) {
+        const buffer = await response.arrayBuffer();
+        return buildTextDocumentPreviewFromParagraphs(parseOdtPreviewFromArchive(buffer), attachmentName);
+      }
+
+      if (isDocxFamily) {
+        const buffer = await response.arrayBuffer();
+        return buildTextDocumentPreviewFromParagraphs(parseDocxPreviewFromArchive(buffer), attachmentName);
+      }
+
+      if (isLegacyDoc) {
+        return buildTextDocumentFallbackPreview(attachmentName, "Previa parcial para DOC indisponivel");
+      }
+
+      return buildTextDocumentFallbackPreview(attachmentName);
+    } catch {
+      return buildTextDocumentFallbackPreview(attachmentName);
+    }
+  })();
+
+  textDocumentPreviewPending.set(absolute, promise);
+
+  try {
+    const resolved = await promise;
+    textDocumentPreviewCache.set(absolute, resolved);
+    return resolved;
+  } finally {
+    textDocumentPreviewPending.delete(absolute);
+  }
+}
+
+async function loadPresentationPreview(
+  rawUrl?: string | null,
+  attachmentName?: string | null,
+  attachmentMime?: string | null
+) {
+  const absolute = toAbsoluteUrl(rawUrl);
+  if (!absolute) return buildPresentationFallbackPreview(attachmentName);
+  const cached = presentationPreviewCache.get(absolute);
+  if (cached) return cached;
+
+  const pending = presentationPreviewPending.get(absolute);
+  if (pending) return pending;
+
+  const promise = (async () => {
+    const lowerMime = String(attachmentMime ?? "").toLowerCase();
+    const lowerName = normalizeAttachmentDisplayName(attachmentName).toLowerCase();
+    const lowerUrl = absolute.toLowerCase();
+    const isFlatOdp =
+      lowerMime.includes("presentation-flat-xml") || lowerName.endsWith(".fodp") || lowerUrl.includes(".fodp");
+    const isOdp =
+      lowerMime.includes("vnd.oasis.opendocument.presentation") ||
+      lowerName.endsWith(".odp") ||
+      lowerUrl.includes(".odp");
+    const isPptxFamily =
+      lowerMime.includes("presentationml") ||
+      lowerMime.includes("ms-powerpoint.presentation.macroenabled.12") ||
+      lowerMime.includes("ms-powerpoint.slideshow.macroenabled.12") ||
+      lowerName.endsWith(".pptx") ||
+      lowerName.endsWith(".pptm") ||
+      lowerName.endsWith(".ppsx") ||
+      lowerName.endsWith(".ppsm") ||
+      lowerName.endsWith(".potx") ||
+      lowerName.endsWith(".potm") ||
+      lowerUrl.includes(".pptx") ||
+      lowerUrl.includes(".pptm") ||
+      lowerUrl.includes(".ppsx") ||
+      lowerUrl.includes(".ppsm") ||
+      lowerUrl.includes(".potx") ||
+      lowerUrl.includes(".potm");
+    const isLegacyPpt =
+      lowerMime.includes("vnd.ms-powerpoint") || lowerName.endsWith(".ppt") || lowerUrl.includes(".ppt");
+
+    try {
+      const response = await fetch(absolute, { credentials: "include" });
+      if (!response.ok) {
+        return buildPresentationFallbackPreview(attachmentName);
+      }
+
+      if (isFlatOdp) {
+        const xmlText = await response.text();
+        return buildPresentationPreviewFromSlides(parseOpenPresentationSlidesFromXml(xmlText), attachmentName);
+      }
+
+      if (isOdp) {
+        const buffer = await response.arrayBuffer();
+        return buildPresentationPreviewFromSlides(parseOdpSlidesFromArchive(buffer), attachmentName);
+      }
+
+      if (isPptxFamily) {
+        const buffer = await response.arrayBuffer();
+        return buildPresentationPreviewFromSlides(parsePptxSlidesFromArchive(buffer), attachmentName);
+      }
+
+      if (isLegacyPpt) {
+        return buildPresentationFallbackPreview(attachmentName, "Previa parcial para PPT indisponivel");
+      }
+
+      return buildPresentationFallbackPreview(attachmentName);
+    } catch {
+      return buildPresentationFallbackPreview(attachmentName);
+    }
+  })();
+
+  presentationPreviewPending.set(absolute, promise);
+
+  try {
+    const resolved = await promise;
+    presentationPreviewCache.set(absolute, resolved);
+    return resolved;
+  } finally {
+    presentationPreviewPending.delete(absolute);
+  }
+}
+
+function SpreadsheetPreview({
+  attachmentUrl,
+  attachmentName,
+  attachmentMime,
+}: {
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+}) {
+  const fallbackPreview = useMemo(
+    () => buildSpreadsheetFallbackPreview(attachmentName, ""),
+    [attachmentName]
+  );
+  const [preview, setPreview] = useState<SpreadsheetPreviewData>(fallbackPreview);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const nextFallback = buildSpreadsheetFallbackPreview(attachmentName, "");
+    setPreview(nextFallback);
+    setLoading(true);
+
+    void loadSpreadsheetPreview(attachmentUrl, attachmentName, attachmentMime).then((data) => {
+      if (cancelled) return;
+      setPreview(data);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attachmentMime, attachmentName, attachmentUrl]);
+
+  return (
+    <div
+      className={`chat-sheetPreview ${loading ? "is-loading" : ""} ${preview.fallback ? "is-fallback" : ""}`}
+    >
+      <div
+        className="chat-sheetPreview__table"
+        style={{ gridTemplateColumns: `34px repeat(${preview.columnCount}, minmax(0, 1fr))` }}
+      >
+        <div className="chat-sheetPreview__corner" aria-hidden="true" />
+        {Array.from({ length: preview.columnCount }, (_, index) => (
+          <div key={`sheet-col-${preview.label}-${index}`} className="chat-sheetPreview__colHeader">
+            {spreadsheetColumnLabel(index)}
+          </div>
+        ))}
+        {preview.rows.map((row, rowIndex) => (
+          <Fragment key={`sheet-row-${preview.label}-${rowIndex}`}>
+            <div className="chat-sheetPreview__rowHeader">{rowIndex + 1}</div>
+            {Array.from({ length: preview.columnCount }, (_, colIndex) => {
+              const cellValue = row[colIndex] ?? "";
+              return (
+                <div
+                  key={`sheet-cell-${preview.label}-${rowIndex}-${colIndex}`}
+                  className={`chat-sheetPreview__cell ${
+                    rowIndex === 0 ? "chat-sheetPreview__cell--headerRow" : ""
+                  } ${!cellValue ? "is-empty" : ""} ${
+                    preview.fallback && rowIndex === 0 && colIndex === 0 ? "chat-sheetPreview__cell--note" : ""
+                  }`}
+                >
+                  {cellValue}
+                </div>
+              );
+            })}
+          </Fragment>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TextDocumentPreview({
+  attachmentUrl,
+  attachmentName,
+  attachmentMime,
+}: {
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+}) {
+  const fallbackPreview = useMemo(
+    () => buildTextDocumentFallbackPreview(attachmentName, ""),
+    [attachmentName]
+  );
+  const [preview, setPreview] = useState<TextDocumentPreviewData>(fallbackPreview);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const nextFallback = buildTextDocumentFallbackPreview(attachmentName, "");
+    setPreview(nextFallback);
+    setLoading(true);
+
+    void loadTextDocumentPreview(attachmentUrl, attachmentName, attachmentMime).then((data) => {
+      if (cancelled) return;
+      setPreview(data);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attachmentMime, attachmentName, attachmentUrl]);
+
+  return (
+    <div
+      className={`chat-textDocPreview ${loading ? "is-loading" : ""} ${preview.fallback ? "is-fallback" : ""}`}
+    >
+      <div className="chat-textDocPreview__page">
+        <div className="chat-textDocPreview__body">
+          {preview.paragraphs.map((paragraph, index) => (
+            <div
+              key={`text-doc-${preview.label}-${index}`}
+              className={`chat-textDocPreview__line ${index === 0 ? "chat-textDocPreview__line--lead" : ""}`}
+            >
+              {paragraph}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PresentationPreview({
+  attachmentUrl,
+  attachmentName,
+  attachmentMime,
+}: {
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+}) {
+  const fallbackPreview = useMemo(
+    () => buildPresentationFallbackPreview(attachmentName, ""),
+    [attachmentName]
+  );
+  const [preview, setPreview] = useState<PresentationPreviewData>(fallbackPreview);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const nextFallback = buildPresentationFallbackPreview(attachmentName, "");
+    setPreview(nextFallback);
+    setLoading(true);
+
+    void loadPresentationPreview(attachmentUrl, attachmentName, attachmentMime).then((data) => {
+      if (cancelled) return;
+      setPreview(data);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attachmentMime, attachmentName, attachmentUrl]);
+
+  return (
+    <div
+      className={`chat-presentationPreview ${loading ? "is-loading" : ""} ${preview.fallback ? "is-fallback" : ""}`}
+    >
+      <div className="chat-presentationPreview__slide">
+        <div className="chat-presentationPreview__accent" aria-hidden="true" />
+        <div className="chat-presentationPreview__title">{preview.title}</div>
+        <div className="chat-presentationPreview__body">
+          {preview.bullets.map((bullet, index) => (
+            <div key={`presentation-${preview.label}-${index}`} className="chat-presentationPreview__bullet">
+              {bullet}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatAudioClock(seconds?: number | null) {
+  const safe = Math.max(0, Number(seconds ?? 0));
+  if (!Number.isFinite(safe)) return "0:00";
+  const rounded = Math.floor(safe);
+  const minutes = Math.floor(rounded / 60);
+  const secs = rounded % 60;
+  return `${minutes}:${secs.toString().padStart(2, "0")}`;
+}
+
+function normalizeAudioPlaybackRate(value?: number | string | null) {
+  const numeric = Number(value ?? 1);
+  return AUDIO_PLAYBACK_RATES.find((rate) => Math.abs(rate - numeric) < 0.001) ?? 1;
+}
+
+function safeTimestamp(value?: string | number | Date | null) {
+  if (!value) return 0;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function readStoredConversationReadMarkers() {
+  if (typeof window === "undefined") return {} as Record<string, string>;
+  try {
+    const raw = window.localStorage.getItem(CONVERSATION_READ_MARKERS_STORAGE_KEY);
+    if (!raw) return {} as Record<string, string>;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return {} as Record<string, string>;
+    const next: Record<string, string> = {};
+    for (const [conversationId, value] of Object.entries(parsed)) {
+      if (typeof value !== "string") continue;
+      if (!safeTimestamp(value)) continue;
+      next[conversationId] = value;
+    }
+    return next;
+  } catch {
+    return {} as Record<string, string>;
+  }
+}
+
+function persistConversationReadMarkers(markers: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CONVERSATION_READ_MARKERS_STORAGE_KEY, JSON.stringify(markers));
+  } catch {}
+}
+
+function conversationLatestActivityTimestamp(
+  conversation?: ConversationListItem | null,
+  items?: Message[] | null
+) {
+  const messageTimestamp = items?.length ? safeTimestamp(items[items.length - 1]?.createdAt) : 0;
+  return Math.max(
+    messageTimestamp,
+    safeTimestamp(conversation?.lastMessage?.createdAt),
+    safeTimestamp(conversation?.updatedAt),
+    safeTimestamp(conversation?.createdAt)
+  );
+}
+
+function applyLocalReadMarkersToConversations(
+  items: ConversationListItem[],
+  markers: Record<string, string>
+) {
+  return items.map((item) => {
+    const unreadCount = Math.max(0, Number(item.unreadCount ?? 0));
+    if (!unreadCount) return item;
+    const localReadAt = safeTimestamp(markers[item.id]);
+    if (!localReadAt) return item;
+    const latestActivityAt = conversationLatestActivityTimestamp(item);
+    if (!latestActivityAt || localReadAt < latestActivityAt) return item;
+    return { ...item, unreadCount: 0 };
+  });
+}
+
+function formatAudioPlaybackRate(rate: (typeof AUDIO_PLAYBACK_RATES)[number]) {
+  return `${rate.toFixed(1)}x`;
+}
+
+function readStoredAudioPlaybackRate() {
+  if (typeof window === "undefined") return 1 as (typeof AUDIO_PLAYBACK_RATES)[number];
+  try {
+    return normalizeAudioPlaybackRate(window.localStorage.getItem(AUDIO_PLAYBACK_RATE_STORAGE_KEY));
+  } catch {
+    return 1 as (typeof AUDIO_PLAYBACK_RATES)[number];
+  }
+}
+
+function persistAudioPlaybackRate(rate: (typeof AUDIO_PLAYBACK_RATES)[number]) {
+  const normalized = normalizeAudioPlaybackRate(rate);
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(AUDIO_PLAYBACK_RATE_STORAGE_KEY, String(normalized));
+    } catch {}
+    window.dispatchEvent(
+      new CustomEvent(AUDIO_PLAYBACK_RATE_EVENT, {
+        detail: normalized,
+      })
+    );
+  }
+  return normalized;
+}
+
+function rememberOptimisticAudioMessageId(messageId?: string | null) {
+  const normalized = String(messageId ?? "").trim();
+  if (!normalized) return;
+  optimisticAudioMessageIds.add(normalized);
+  if (optimisticAudioMessageIds.size <= 200) return;
+  const oldest = optimisticAudioMessageIds.values().next().value;
+  if (oldest) optimisticAudioMessageIds.delete(oldest);
+}
+
+function AudioMessagePlayer({
+  attachmentUrl,
+  attachmentName,
+  createdAt,
+  showMeta = true,
+}: {
+  attachmentUrl?: string | null;
+  attachmentName?: string | null;
+  createdAt?: string | null;
+  showMeta?: boolean;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState<(typeof AUDIO_PLAYBACK_RATES)[number]>(() =>
+    readStoredAudioPlaybackRate()
+  );
+  const [hasStartedPlayback, setHasStartedPlayback] = useState(playbackRate !== 1);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const syncState = () => {
+      setCurrentTime(audio.currentTime || 0);
+      setDuration(audio.duration || 0);
+      if ((audio.currentTime || 0) > 0) setHasStartedPlayback(true);
+    };
+    const handlePlay = () => {
+      setIsPlaying(true);
+      setHasStartedPlayback(true);
+    };
+    const handlePause = () => setIsPlaying(false);
+    const handleEnded = () => {
+      setIsPlaying(false);
+      setCurrentTime(audio.duration || 0);
+    };
+
+    audio.addEventListener("loadedmetadata", syncState);
+    audio.addEventListener("durationchange", syncState);
+    audio.addEventListener("timeupdate", syncState);
+    audio.addEventListener("play", handlePlay);
+    audio.addEventListener("pause", handlePause);
+    audio.addEventListener("ended", handleEnded);
+    syncState();
+
+    return () => {
+      audio.pause();
+      audio.removeEventListener("loadedmetadata", syncState);
+      audio.removeEventListener("durationchange", syncState);
+      audio.removeEventListener("timeupdate", syncState);
+      audio.removeEventListener("play", handlePlay);
+      audio.removeEventListener("pause", handlePause);
+      audio.removeEventListener("ended", handleEnded);
+    };
+  }, [attachmentUrl]);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = playbackRate;
+  }, [playbackRate]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const syncStoredRate = (event?: Event) => {
+      const nextRate =
+        event && "detail" in event
+          ? normalizeAudioPlaybackRate((event as CustomEvent<number>).detail)
+          : readStoredAudioPlaybackRate();
+      setPlaybackRate(nextRate);
+    };
+
+    window.addEventListener(AUDIO_PLAYBACK_RATE_EVENT, syncStoredRate as EventListener);
+    window.addEventListener("storage", syncStoredRate);
+    return () => {
+      window.removeEventListener(AUDIO_PLAYBACK_RATE_EVENT, syncStoredRate as EventListener);
+      window.removeEventListener("storage", syncStoredRate);
+    };
+  }, []);
+
+  const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+  const displayName = normalizeAttachmentDisplayName(attachmentName) || "Áudio";
+  const displayedTime =
+    currentTime > 0 && (!duration || currentTime < duration) ? currentTime : duration || currentTime;
+  const showRateTag = hasStartedPlayback || playbackRate !== 1;
+  const thumbLeft =
+    progress <= 0 ? "0px" : progress >= 100 ? "calc(100% - 14px)" : `calc(${progress}% - 7px)`;
+
+  async function togglePlayback() {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (audio.paused) {
+      setHasStartedPlayback(true);
+      try {
+        await audio.play();
+      } catch {}
+      return;
+    }
+
+    audio.pause();
+  }
+
+  function seekAudio(event: ReactMouseEvent<HTMLButtonElement>) {
+    const audio = audioRef.current;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!audio || !rect.width || !duration) return;
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    audio.currentTime = ratio * duration;
+    setCurrentTime(audio.currentTime);
+  }
+
+  function cyclePlaybackRate() {
+    setPlaybackRate((current) => {
+      const currentIndex = AUDIO_PLAYBACK_RATES.indexOf(current);
+      const nextRate = AUDIO_PLAYBACK_RATES[(currentIndex + 1) % AUDIO_PLAYBACK_RATES.length] ?? 1;
+      if (audioRef.current) audioRef.current.playbackRate = nextRate;
+      return persistAudioPlaybackRate(nextRate);
+    });
+  }
+
+  return (
+    <div className="chat-audioCard" title={displayName}>
+      <audio ref={audioRef} src={toAbsoluteUrl(attachmentUrl) ?? ""} preload="metadata" />
+      {showRateTag ? (
+        <button
+          type="button"
+          className="chat-audioCard__rate"
+          onClick={cyclePlaybackRate}
+          aria-label={`Velocidade atual ${formatAudioPlaybackRate(playbackRate)}`}
+          title="Alterar velocidade"
+        >
+          {formatAudioPlaybackRate(playbackRate)}
+        </button>
+      ) : (
+        <span className="chat-audioCard__marker" aria-hidden="true">
+          <HeadphonesIcon />
+        </span>
+      )}
+
+      <button
+        type="button"
+        className="chat-audioCard__play"
+        onClick={() => void togglePlayback()}
+        aria-label={isPlaying ? "Pausar áudio" : "Reproduzir áudio"}
+        title={isPlaying ? "Pausar áudio" : "Reproduzir áudio"}
+      >
+        {isPlaying ? <PauseIcon /> : <PlayIcon />}
+      </button>
+
+      <div className="chat-audioCard__main">
+        <button
+          type="button"
+          className="chat-audioCard__track"
+          onClick={seekAudio}
+          title="Ir para este ponto"
+          aria-label="Linha do tempo do áudio"
+        >
+          <span className="chat-audioCard__trackBase" aria-hidden="true" />
+          <span className="chat-audioCard__trackFill" style={{ width: `${progress}%` }} aria-hidden="true" />
+          <span className="chat-audioCard__trackThumb" style={{ left: thumbLeft }} aria-hidden="true" />
+        </button>
+
+        <div className="chat-audioCard__footer">
+          <span className="chat-audioCard__duration">{formatAudioClock(displayedTime)}</span>
+          {showMeta && createdAt ? <span className="chat-audioCard__time">{fmtTime(createdAt)}</span> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function mediaLabel(message: Partial<Message>) {
+  if (isAudioMessageAttachment(message)) return "Áudio";
   if (isVideoAttachment(message)) return "Vídeo";
   if (isImageAttachment(message)) return "Imagem";
   if (message.contentType === "FILE") return normalizeAttachmentDisplayName(message.attachmentName) || "Arquivo";
   return "Mensagem";
+}
+
+function AttachmentKindIcon({ message }: { message: Partial<Message> }) {
+  if (isAudioMessageAttachment(message) || isAudioDocumentAttachment(message)) return <HeadphonesIcon />;
+  return <FileIcon />;
+}
+
+function attachmentTypeLabel(message: Partial<Message>) {
+  const name = normalizeAttachmentDisplayName(message.attachmentName);
+  const ext = name.includes(".") ? name.split(".").pop()?.trim().toUpperCase() ?? "" : "";
+  if (ext && ext.length <= 6) return ext;
+
+  const mime = String(message.attachmentMime ?? "").toLowerCase().trim();
+  if (mime === "application/pdf") return "PDF";
+  if (mime.startsWith("image/")) return mime.slice("image/".length).toUpperCase();
+  if (mime.startsWith("video/")) return mime.slice("video/".length).toUpperCase();
+
+  return "ARQ";
 }
 
 const REMOVED_ATTACHMENT_NOTICE_GENERIC =
@@ -530,6 +2104,16 @@ function stripAttachmentRemovalNotice(value?: string | null) {
   text = text.replace(REMOVED_ATTACHMENT_NOTICE_FILE, "");
   text = text.replace(REMOVED_ATTACHMENT_NOTICE_GENERIC, "");
   return text.trim();
+}
+
+function isRemovedAttachmentNoticeMessage(message: Partial<Message>) {
+  if (!message.deletedAt) return false;
+  const text = String(message.body ?? "");
+  return (
+    text.includes(REMOVED_ATTACHMENT_NOTICE_IMAGE) ||
+    text.includes(REMOVED_ATTACHMENT_NOTICE_FILE) ||
+    text.includes(REMOVED_ATTACHMENT_NOTICE_GENERIC)
+  );
 }
 
 function toAbsoluteUrl(url?: string | null) {
@@ -552,6 +2136,175 @@ function sortConversationItems(items: ConversationListItem[]) {
     if (pinDiff !== 0) return pinDiff;
     return conversationRankTimestamp(b) - conversationRankTimestamp(a);
   });
+}
+
+function upsertConversationItem(
+  items: ConversationListItem[],
+  conversation: ConversationListItem
+) {
+  const next = items.some((item) => item.id === conversation.id)
+    ? items.map((item) => (item.id === conversation.id ? { ...item, ...conversation } : item))
+    : [conversation, ...items];
+  return sortConversationItems(next);
+}
+
+function conversationKind(conv?: ConversationListItem | null): ConversationKind {
+  const kind = conv?.kind;
+  return kind === "GROUP" || kind === "BROADCAST" ? kind : "DIRECT";
+}
+
+function conversationParticipants(conv?: ConversationListItem | null) {
+  return Array.isArray(conv?.participants) ? conv?.participants ?? [] : [];
+}
+
+function conversationBroadcastTargets(conv?: ConversationListItem | null) {
+  return Array.isArray(conv?.broadcastTargets) ? conv?.broadcastTargets ?? [] : [];
+}
+
+function conversationDisplayName(conv?: ConversationListItem | null) {
+  if (!conv) return "Conversa";
+  if (conversationKind(conv) === "DIRECT") {
+    return conv.otherUser?.name ?? conv.title?.trim() ?? "Conversa";
+  }
+  return conv.title?.trim() || conv.rawTitle?.trim() || "Conversa";
+}
+
+function conversationAvatarUrl(conv?: ConversationListItem | null) {
+  if (!conv) return null;
+  return conversationKind(conv) === "DIRECT" ? conv.otherUser?.avatarUrl ?? null : conv.avatarUrl ?? null;
+}
+
+function conversationAvatarFallback(conv?: ConversationListItem | null) {
+  const title = conversationDisplayName(conv).trim();
+  return title ? title.slice(0, 1).toUpperCase() : "C";
+}
+
+function conversationSummaryLine(conv?: ConversationListItem | null) {
+  if (!conv) return "";
+
+  if (conversationKind(conv) === "DIRECT") {
+    const department = conv.otherUser?.department?.name ?? "Sem setor";
+    const company = conv.otherUser?.company?.name;
+    return company ? `${department} • ${company}` : department;
+  }
+
+  if (conversationKind(conv) === "GROUP") {
+    const count = Math.max(
+      Number(conv.participantCount ?? 0),
+      conversationParticipants(conv).length,
+    );
+    const countLabel = count === 1 ? "1 participante" : `${count} participantes`;
+    return conv.isCurrentParticipant === false ? `Você saiu • ${countLabel}` : countLabel;
+  }
+
+  const count = Math.max(
+    Number(conv.targetCount ?? 0),
+    conversationBroadcastTargets(conv).length,
+  );
+  return count === 1 ? "1 contato" : `${count} contatos`;
+}
+
+function computeBroadcastEffectiveUsers(
+  users: UserMini[],
+  ownerId: string | null | undefined,
+  explicitTargetIds: string[],
+  companyIds: string[],
+  departmentIds: string[],
+  excludedUserIds: string[],
+  includeAllUsers: boolean
+) {
+  const out = new Map<string, UserMini>();
+  const owner = String(ownerId ?? "").trim();
+  const explicitSet = new Set(explicitTargetIds);
+  const companySet = new Set(companyIds);
+  const departmentSet = new Set(departmentIds);
+  const excludedSet = new Set(excludedUserIds);
+
+  for (const user of users) {
+    if (user.id === owner) continue;
+    const matchesRule =
+      includeAllUsers ||
+      (user.company?.id ? companySet.has(user.company.id) : false) ||
+      (user.department?.id ? departmentSet.has(user.department.id) : false);
+    if (explicitSet.has(user.id) || matchesRule) {
+      out.set(user.id, user);
+    }
+  }
+
+  for (const excludedId of excludedSet) {
+    out.delete(excludedId);
+  }
+
+  return Array.from(out.values()).sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
+}
+
+function buildConversationDetailsFallback(conversation: ConversationListItem, users: UserMini[]) {
+  const participants = conversationParticipants(conversation);
+  const base: ConversationListItem = {
+    ...conversation,
+    participants,
+    participantCount: Math.max(Number(conversation.participantCount ?? 0), participants.length),
+  };
+
+  if (conversationKind(conversation) !== "BROADCAST") {
+    return base;
+  }
+
+  const explicitTargets = conversationBroadcastTargets(conversation);
+  const effectiveTargets =
+    conversation.effectiveBroadcastTargets && conversation.effectiveBroadcastTargets.length
+      ? conversation.effectiveBroadcastTargets
+      : explicitTargets;
+  const effectiveTargetIds = new Set(effectiveTargets.map((user) => user.id));
+  const ownerId = conversation.createdById ?? null;
+  const availableUsers = users
+    .filter((user) => user.id !== ownerId && !effectiveTargetIds.has(user.id))
+    .sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
+
+  return {
+    ...base,
+    broadcastTargets: explicitTargets,
+    targetCount: Math.max(Number(conversation.targetCount ?? 0), explicitTargets.length),
+    broadcastIncludeAllUsers: !!conversation.broadcastIncludeAllUsers,
+    broadcastTargetCompanies: conversation.broadcastTargetCompanies ?? [],
+    broadcastTargetDepartments: conversation.broadcastTargetDepartments ?? [],
+    broadcastExcludedUsers: conversation.broadcastExcludedUsers ?? [],
+    effectiveBroadcastTargets: effectiveTargets,
+    availableBroadcastUsers: conversation.availableBroadcastUsers ?? availableUsers,
+  };
+}
+
+function conversationPreviewText(conv: ConversationListItem, meId?: string | null) {
+  const lastMessage = conv.lastMessage;
+  if (lastMessage?.body?.trim()) {
+    const prefix =
+      conversationKind(conv) === "GROUP" && lastMessage.senderId !== meId
+        ? `${lastMessage.sender?.name ?? "Contato"}: `
+        : "";
+    return `${prefix}${lastMessage.body.trim()}`;
+  }
+
+  if (isAudioMessageAttachment(lastMessage ?? {})) {
+    return conversationKind(conv) === "GROUP" && lastMessage?.senderId !== meId
+      ? `${lastMessage?.sender?.name ?? "Contato"}: Áudio`
+      : "Áudio";
+  }
+
+  if (isMediaAttachment(lastMessage ?? {})) {
+    const label = mediaLabel(lastMessage ?? {});
+    return conversationKind(conv) === "GROUP" && lastMessage?.senderId !== meId
+      ? `${lastMessage?.sender?.name ?? "Contato"}: ${label}`
+      : label;
+  }
+
+  if (lastMessage?.contentType === "FILE" || lastMessage?.contentType === "AUDIO") {
+    const label = normalizeAttachmentDisplayName(lastMessage?.attachmentName) || "Arquivo";
+    return conversationKind(conv) === "GROUP" && lastMessage?.senderId !== meId
+      ? `${lastMessage?.sender?.name ?? "Contato"}: ${label}`
+      : label;
+  }
+
+  return conversationSummaryLine(conv);
 }
 
 function escapeRegExp(v: string) {
@@ -582,6 +2335,7 @@ function aggregateReactions(raw?: ReactionRaw[], myId?: string | null): Reaction
 function replyPreviewText(msg?: ReplyToMessage | null) {
   if (!msg) return "Mensagem";
   if (msg.body?.trim()) return msg.body.trim();
+  if (isAudioMessageAttachment(msg)) return "Áudio";
   if (isMediaAttachment(msg)) return isVideoAttachment(msg) ? "Vídeo" : "Imagem";
   if (msg.contentType === "FILE") return normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo";
   return "Mensagem";
@@ -591,6 +2345,7 @@ function messageSearchableText(msg: Partial<Message>) {
   return [
     msg.body ?? "",
     normalizeAttachmentDisplayName(msg.attachmentName),
+    isAudioMessageAttachment(msg) ? "audio áudio" : "",
     isVideoAttachment(msg) ? "video" : isImageAttachment(msg) ? "imagem" : "",
   ]
     .join(" ")
@@ -600,10 +2355,31 @@ function messageSearchableText(msg: Partial<Message>) {
 function messageNotificationPreview(msg: Message) {
   const body = msg.body?.trim();
   if (body) return body.length > 120 ? `${body.slice(0, 117)}...` : body;
+  if (isAudioMessageAttachment(msg)) return "Áudio";
   if (isMediaAttachment(msg)) return isVideoAttachment(msg) ? "Vídeo" : "Imagem";
   const attachmentName = normalizeAttachmentDisplayName(msg.attachmentName);
   if (msg.contentType === "FILE") return attachmentName ? `Arquivo: ${attachmentName}` : "Arquivo";
   return "Nova mensagem";
+}
+
+function pickerRequestErrorMessage(error: any, fallback: string) {
+  const status = Number(error?.response?.status ?? 0);
+  const apiMessage = error?.response?.data?.message;
+
+  if (status === 404) {
+    return "O backend do chat ainda nao foi atualizado/reiniciado para grupos e listas.";
+  }
+
+  if (typeof apiMessage === "string" && apiMessage.trim()) {
+    return apiMessage.trim();
+  }
+
+  return fallback;
+}
+
+function isAuthRequestError(error: any) {
+  const status = Number(error?.response?.status ?? 0);
+  return status === 401 || status === 403;
 }
 
 function HighlightText({
@@ -652,6 +2428,22 @@ function PlusIcon() {
   );
 }
 
+function ComposeConversationIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+      <path
+        d="M7.2 5.75h8.45a4.55 4.55 0 0 1 4.55 4.55v.95a4.55 4.55 0 0 1-4.55 4.55h-4.5L7 19.95c-.7.55-1.72.05-1.72-.84v-3.08a4.5 4.5 0 0 1-2.48-4.03v-1.7a4.55 4.55 0 0 1 4.4-4.55Z"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+      <circle cx="17.45" cy="7.55" r="3.1" fill="currentColor" />
+      <path d="M17.45 5.95v3.2M15.85 7.55h3.2" stroke="var(--bhash-primary)" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function SmileIcon() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
@@ -663,16 +2455,102 @@ function SmileIcon() {
   );
 }
 
-function PaperclipIcon() {
+function ChatMediaAttachmentButton({
+  message,
+  attachmentUrl,
+  onOpen,
+  timeLabel,
+}: {
+  message: Message;
+  attachmentUrl: string;
+  onOpen: () => void;
+  timeLabel: string;
+}) {
+  const isVideo = isVideoAttachment(message);
+  const [layout, setLayout] = useState<MediaPreviewLayout>(() => mediaPreviewLayoutCache.get(attachmentUrl) ?? "square");
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadMediaPreviewLayout(attachmentUrl, isVideo).then((nextLayout) => {
+      if (!cancelled) setLayout(nextLayout);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [attachmentUrl, isVideo]);
+
+  return (
+    <button
+      type="button"
+      className={`chat-imageLink chat-imageLink--btn chat-imageLink--btn--${layout}`}
+      onClick={onOpen}
+      title={isVideo ? "Abrir mídia" : "Abrir imagem"}
+    >
+      <div className={`chat-mediaVisualFrame chat-mediaVisualFrame--${layout}`}>
+        {isVideo ? (
+          <div className={`chat-videoPreview chat-videoPreview--${layout}`}>
+            <video
+              src={attachmentUrl}
+              className="chat-imagePreview chat-imagePreview--framed"
+              preload="metadata"
+              muted
+              playsInline
+            />
+            <span className="chat-videoPreview__play" aria-hidden="true">
+              <PlayOverlayIcon />
+            </span>
+          </div>
+        ) : (
+          <img
+            src={attachmentUrl}
+            alt={normalizeAttachmentDisplayName(message.attachmentName) || "imagem"}
+            className="chat-imagePreview chat-imagePreview--framed"
+            loading="lazy"
+            decoding="async"
+          />
+        )}
+        <div className="chat-mediaVisualFrame__meta">
+          <span>{timeLabel}</span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function HeadphonesIcon() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
       <path
-        d="M8 12.5l6.9-6.9a3.2 3.2 0 1 1 4.5 4.5l-9.2 9.2a5 5 0 1 1-7.1-7.1l9.6-9.6"
+        d="M4.5 12a7.5 7.5 0 0 1 15 0"
         stroke="currentColor"
-        strokeWidth="2"
+        strokeWidth="1.9"
         strokeLinecap="round"
-        strokeLinejoin="round"
       />
+      <path
+        d="M5.5 12.3h2.1c.5 0 .9.4.9.9v4.1c0 .5-.4.9-.9.9H6.3a1.8 1.8 0 0 1-1.8-1.8v-2.3c0-1 .8-1.8 1.8-1.8Z"
+        fill="currentColor"
+      />
+      <path
+        d="M16.4 12.3h2.1c1 0 1.8.8 1.8 1.8v2.3a1.8 1.8 0 0 1-1.8 1.8h-1.3c-.5 0-.9-.4-.9-.9v-4.1c0-.5.4-.9.9-.9Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+      <path d="M8.2 6.7a1 1 0 0 1 1.53-.84l8.18 5.3a1 1 0 0 1 0 1.68l-8.18 5.3A1 1 0 0 1 8.2 17.3V6.7Z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+      <rect x="7" y="6" width="3.5" height="12" rx="1.2" />
+      <rect x="13.5" y="6" width="3.5" height="12" rx="1.2" />
     </svg>
   );
 }
@@ -883,40 +2761,62 @@ function GearIcon() {
 }
 
 function PinIcon({ filled = false }: { filled?: boolean }) {
+  if (filled) {
+    return (
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
+        <path
+          d="M9.4 4.2c0-.66.54-1.2 1.2-1.2h2.8c.66 0 1.2.54 1.2 1.2v3.72c0 .48.19.94.53 1.28l2.04 2.04c.5.5.14 1.36-.57 1.36H13v7.15c0 .55-.45 1-1 1s-1-.45-1-1V12.6H7.43c-.71 0-1.07-.86-.57-1.36l2.04-2.04c.34-.34.53-.8.53-1.28V4.2Z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+
   return (
-    <svg viewBox="0 0 24 24" width="17" height="17" fill={filled ? "currentColor" : "none"} aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
       <path
-        d="M15 4v4l3 3v1H6v-1l3-3V4h6Zm-3 8v8"
+        d="M9.5 4.5c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v3.63c0 .53.21 1.04.59 1.41l1.46 1.46H7.95l1.46-1.46A2 2 0 0 0 10 8.13V4.5Z"
         stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
+        strokeWidth="1.9"
         strokeLinejoin="round"
       />
+      <path d="M12 11v8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }
 
 export function ChatPage() {
-  const { logoff, api, token } = useAuth();
+  const { logoff, logout, api, token } = useAuth();
   const { theme, toggleTheme, resolvedLogoUrl } = useTheme();
 
   const [me, setMe] = useState<Me | null>(null);
 
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [loadingConvs, setLoadingConvs] = useState(false);
+  const [conversationsError, setConversationsError] = useState<string | null>(null);
 
   const [activeConv, setActiveConv] = useState<ConversationListItem | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [messagesNextCursor, setMessagesNextCursor] = useState<string | null>(null);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [loadingOlderMsgs, setLoadingOlderMsgs] = useState(false);
   const [messagesErr, setMessagesErr] = useState<string | null>(null);
   const [sendErr, setSendErr] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
   const [text, setText] = useState("");
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerMode, setPickerMode] = useState<CreatePickerMode>("direct");
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
+  const [pickerSubmitting, setPickerSubmitting] = useState(false);
+  const [pickerTitle, setPickerTitle] = useState("");
+  const [pickerSelectedUserIds, setPickerSelectedUserIds] = useState<string[]>([]);
+  const [pickerSelectedCompanyIds, setPickerSelectedCompanyIds] = useState<string[]>([]);
+  const [pickerSelectedDepartmentIds, setPickerSelectedDepartmentIds] = useState<string[]>([]);
+  const [pickerIncludeAllUsers, setPickerIncludeAllUsers] = useState(false);
+  const [pickerConversationId, setPickerConversationId] = useState<string | null>(null);
   const [users, setUsers] = useState<UserMini[]>([]);
   const [userSearch, setUserSearch] = useState("");
   const [userCompanyFilter, setUserCompanyFilter] = useState("");
@@ -932,20 +2832,31 @@ export function ChatPage() {
 
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
 
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
-  const [attachmentMode, setAttachmentMode] = useState<"image" | "file" | null>(null);
+  const [attachmentMode, setAttachmentMode] = useState<"image" | "file" | "audio" | null>(null);
   const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
 
   const [actionMenuMsgId, setActionMenuMsgId] = useState<string | null>(null);
   const [actionMenuAlign, setActionMenuAlign] = useState<"left" | "right">("right");
   const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
+  const [conversationSelectMode, setConversationSelectMode] = useState(false);
+  const [selectedConversationIds, setSelectedConversationIds] = useState<string[]>([]);
+  const [removeChatsPrompt, setRemoveChatsPrompt] = useState<{ ids: string[]; totalCount: number } | null>(null);
+  const [conversationClearPrompt, setConversationClearPrompt] = useState<ConversationClearPrompt | null>(null);
+  const [pendingConversationHideBatch, setPendingConversationHideBatch] = useState<PendingConversationHideBatch | null>(null);
+  const [pendingConversationClearBatch, setPendingConversationClearBatch] = useState<PendingConversationClearBatch | null>(null);
+  const [pendingConversationCountdownMs, setPendingConversationCountdownMs] = useState(0);
   const [reactionBarMsgId, setReactionBarMsgId] = useState<string | null>(null);
   const [reactionPickerMsgId, setReactionPickerMsgId] = useState<string | null>(null);
 
   const [multiDeleteMode, setMultiDeleteMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
+  const [favoriteDeletePrompt, setFavoriteDeletePrompt] = useState<FavoriteDeletePrompt | null>(null);
+  const [pendingDeleteBatch, setPendingDeleteBatch] = useState<PendingMessageDeleteBatch | null>(null);
+  const [pendingDeleteCountdownMs, setPendingDeleteCountdownMs] = useState(0);
   const [newMsgsCount, setNewMsgsCount] = useState(0);
   const [showJumpNew, setShowJumpNew] = useState(false);
   const [unreadAnchorMessageId, setUnreadAnchorMessageId] = useState<string | null>(null);
@@ -954,6 +2865,8 @@ export function ChatPage() {
   const [avatarRemoving, setAvatarRemoving] = useState(false);
   const [brokenAvatarUrls, setBrokenAvatarUrls] = useState<Set<string>>(new Set());
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [removalNoticesLoading, setRemovalNoticesLoading] = useState(false);
+  const [removalNoticesProgress, setRemovalNoticesProgress] = useState(0);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -961,6 +2874,20 @@ export function ChatPage() {
   const [profileMediaTab, setProfileMediaTab] = useState<"image" | "file">("image");
   const [profileMediaItems, setProfileMediaItems] = useState<MediaItem[]>([]);
   const [profileMediaLoading, setProfileMediaLoading] = useState(false);
+  const [conversationDetailsOpen, setConversationDetailsOpen] = useState(false);
+  const [conversationDetailsLoading, setConversationDetailsLoading] = useState(false);
+  const [conversationDetailsError, setConversationDetailsError] = useState<string | null>(null);
+  const [conversationDetails, setConversationDetails] = useState<ConversationListItem | null>(null);
+  const [conversationDetailsSaving, setConversationDetailsSaving] = useState(false);
+  const [conversationDetailsTitle, setConversationDetailsTitle] = useState("");
+  const [conversationDetailsSelectedUserIds, setConversationDetailsSelectedUserIds] = useState<string[]>([]);
+  const [conversationDetailsSelectedCompanyIds, setConversationDetailsSelectedCompanyIds] = useState<string[]>([]);
+  const [conversationDetailsSelectedDepartmentIds, setConversationDetailsSelectedDepartmentIds] = useState<string[]>([]);
+  const [conversationDetailsExcludedUserIds, setConversationDetailsExcludedUserIds] = useState<string[]>([]);
+  const [conversationDetailsIncludeAllUsers, setConversationDetailsIncludeAllUsers] = useState(false);
+  const [conversationDetailsLegacyMode, setConversationDetailsLegacyMode] = useState(false);
+  const [conversationAvatarUploading, setConversationAvatarUploading] = useState(false);
+  const [conversationAvatarRemoving, setConversationAvatarRemoving] = useState(false);
   const [myInfoOpen, setMyInfoOpen] = useState(false);
 
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
@@ -974,22 +2901,34 @@ export function ChatPage() {
 
   const socketRef = useRef<Socket | null>(null);
   const conversationsRef = useRef<ConversationListItem[]>([]);
+  const conversationReadMarkersRef = useRef<Record<string, string>>(readStoredConversationReadMarkers());
   const convListRef = useRef<HTMLDivElement | null>(null);
   const convPositionsRef = useRef<Map<string, number>>(new Map());
+  const createMenuRef = useRef<HTMLDivElement | null>(null);
   const msgListRef = useRef<HTMLDivElement | null>(null);
   const isMsgListNearBottomRef = useRef(true);
   const composerInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const myAvatarInputRef = useRef<HTMLInputElement | null>(null);
+  const conversationAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const searchDebounceRef = useRef<number | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
+  const messagesNextCursorRef = useRef<string | null>(null);
+  const loadingOlderMsgsRef = useRef(false);
   const meIdRef = useRef<string | null>(null);
   const handledRealtimeMessageIdsRef = useRef<Set<string>>(new Set());
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
   const canConsumeUnreadAnchorRef = useRef(false);
   const hasSeenUnreadMarkerRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
+  const removalNoticesProgressTimerRef = useRef<number | null>(null);
+  const removalNoticesFinishTimerRef = useRef<number | null>(null);
+  const pendingDeleteFinalizeTimerRef = useRef<number | null>(null);
+  const pendingDeleteCountdownTimerRef = useRef<number | null>(null);
+  const pendingConversationFinalizeTimerRef = useRef<number | null>(null);
+  const pendingConversationCountdownTimerRef = useRef<number | null>(null);
   const imageViewerConvIdRef = useRef<string | null>(null);
   const imageViewerDragRef = useRef<{
     active: boolean;
@@ -1000,9 +2939,46 @@ export function ChatPage() {
   } | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
+  function rememberConversationRead(
+    conversationId: string,
+    readAt?: string | number | Date | null,
+    conversation?: ConversationListItem | null,
+    items?: Message[] | null
+  ) {
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedConversationId) return;
+    const candidateTimestamp = Math.max(
+      safeTimestamp(readAt),
+      conversationLatestActivityTimestamp(conversation, items)
+    );
+    if (!candidateTimestamp) return;
+    const currentTimestamp = safeTimestamp(conversationReadMarkersRef.current[normalizedConversationId]);
+    if (currentTimestamp >= candidateTimestamp) return;
+    const next = {
+      ...conversationReadMarkersRef.current,
+      [normalizedConversationId]: new Date(candidateTimestamp).toISOString(),
+    };
+    conversationReadMarkersRef.current = next;
+    persistConversationReadMarkers(next);
+  }
+
   useEffect(() => {
     activeConvIdRef.current = activeConv?.id ?? null;
   }, [activeConv?.id]);
+
+  useEffect(() => {
+    setMultiDeleteMode(false);
+    setSelectedMessageIds([]);
+    setFavoriteDeletePrompt(null);
+  }, [activeConv?.id]);
+
+  useEffect(() => {
+    messagesNextCursorRef.current = messagesNextCursor;
+  }, [messagesNextCursor]);
+
+  useEffect(() => {
+    loadingOlderMsgsRef.current = loadingOlderMsgs;
+  }, [loadingOlderMsgs]);
 
   useEffect(() => {
     meIdRef.current = me?.id ?? null;
@@ -1019,6 +2995,28 @@ export function ChatPage() {
   }, []);
 
   useEffect(() => {
+    if (!createMenuOpen) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (createMenuRef.current?.contains(target)) return;
+      setCreateMenuOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setCreateMenuOpen(false);
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [createMenuOpen]);
+
+  useEffect(() => {
     return () => {
       if (attachmentPreviewUrl?.startsWith("blob:")) {
         URL.revokeObjectURL(attachmentPreviewUrl);
@@ -1031,6 +3029,24 @@ export function ChatPage() {
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
       }
+      if (removalNoticesProgressTimerRef.current) {
+        window.clearInterval(removalNoticesProgressTimerRef.current);
+      }
+      if (removalNoticesFinishTimerRef.current) {
+        window.clearTimeout(removalNoticesFinishTimerRef.current);
+      }
+      if (pendingDeleteFinalizeTimerRef.current) {
+        window.clearTimeout(pendingDeleteFinalizeTimerRef.current);
+      }
+      if (pendingDeleteCountdownTimerRef.current) {
+        window.clearInterval(pendingDeleteCountdownTimerRef.current);
+      }
+      if (pendingConversationFinalizeTimerRef.current) {
+        window.clearTimeout(pendingConversationFinalizeTimerRef.current);
+      }
+      if (pendingConversationCountdownTimerRef.current) {
+        window.clearInterval(pendingConversationCountdownTimerRef.current);
+      }
     };
   }, []);
 
@@ -1039,6 +3055,7 @@ export function ChatPage() {
       setActionMenuMsgId(null);
       setActionMenuPosition(null);
       setEmojiOpen(false);
+      setAttachMenuOpen(false);
       setConversationMenuId(null);
       setReactionBarMsgId(null);
       setReactionPickerMsgId(null);
@@ -1054,6 +3071,25 @@ export function ChatPage() {
       el.scrollTop = el.scrollHeight;
       isMsgListNearBottomRef.current = true;
     });
+  }
+
+  function flashMessageRow(row: HTMLElement) {
+    row.classList.remove("chat-msg-flash");
+    void row.offsetWidth;
+    row.classList.add("chat-msg-flash");
+    window.setTimeout(() => row.classList.remove("chat-msg-flash"), 1200);
+  }
+
+  function focusRenderedMessage(messageId: string) {
+    const container = msgListRef.current;
+    if (!container) return false;
+
+    const row = container.querySelector(`[data-mid="${messageId}"]`) as HTMLElement | null;
+    if (!row) return false;
+
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    flashMessageRow(row);
+    return true;
   }
 
   function scrollToUnreadAnchor() {
@@ -1148,6 +3184,7 @@ export function ChatPage() {
     setAttachmentPreviewUrl(null);
     setSendErr(null);
     if (imageInputRef.current) imageInputRef.current.value = "";
+    if (audioInputRef.current) audioInputRef.current.value = "";
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -1178,8 +3215,11 @@ export function ChatPage() {
       return;
     }
 
-    const conv = conversationsRef.current.find((item) => item.id === msg.conversationId);
-    const title = msg.sender?.name || conv?.otherUser?.name || "Nova mensagem";
+    const conv = conversationsRef.current.find((item) => item.id === msg.conversationId) ?? null;
+    const title =
+      conversationKind(conv) === "GROUP"
+        ? `${msg.sender?.name ?? "Nova mensagem"} • ${conversationDisplayName(conv)}`
+        : conversationDisplayName(conv) || msg.sender?.name || "Nova mensagem";
     const body = messageNotificationPreview(msg);
     rememberNotifiedMessage(msg.id);
 
@@ -1268,7 +3308,10 @@ export function ChatPage() {
           }
         }
       });
-      if (!isMine) void markConversationRead(msg.conversationId);
+      if (!isMine) {
+        rememberConversationRead(msg.conversationId, msg.createdAt);
+        void markConversationRead(msg.conversationId, msg.createdAt);
+      }
     }
 
     if (!hadConversation) {
@@ -1377,7 +3420,7 @@ export function ChatPage() {
     });
   }
 
-  function showToast(message: string) {
+  function showToast(message: string, durationMs = 1800) {
     if (toastTimerRef.current) {
       window.clearTimeout(toastTimerRef.current);
     }
@@ -1385,7 +3428,545 @@ export function ChatPage() {
     toastTimerRef.current = window.setTimeout(() => {
       setToastMessage(null);
       toastTimerRef.current = null;
-    }, 1800);
+    }, durationMs);
+  }
+
+  function clearPendingDeleteTimers() {
+    if (pendingDeleteFinalizeTimerRef.current) {
+      window.clearTimeout(pendingDeleteFinalizeTimerRef.current);
+      pendingDeleteFinalizeTimerRef.current = null;
+    }
+    if (pendingDeleteCountdownTimerRef.current) {
+      window.clearInterval(pendingDeleteCountdownTimerRef.current);
+      pendingDeleteCountdownTimerRef.current = null;
+    }
+  }
+
+  function stopMultiDeleteMode() {
+    setMultiDeleteMode(false);
+    setSelectedMessageIds([]);
+    setFavoriteDeletePrompt(null);
+  }
+
+  function toggleMessageSelection(messageId: string) {
+    setSelectedMessageIds((prev) =>
+      prev.includes(messageId) ? prev.filter((id) => id !== messageId) : [...prev, messageId]
+    );
+  }
+
+  function toggleSelectAllMessages() {
+    setSelectedMessageIds((prev) =>
+      prev.length === selectableMessageIds.length ? [] : selectableMessageIds
+    );
+  }
+
+  function mergeCollectionByCreatedAt<T extends { id: string; createdAt?: string | null }>(
+    current: T[],
+    restored: T[],
+    order: "asc" | "desc" = "asc"
+  ) {
+    const map = new Map<string, T>();
+    for (const item of [...current, ...restored]) map.set(item.id, item);
+    const direction = order === "asc" ? 1 : -1;
+    return Array.from(map.values()).sort((a, b) => {
+      const aTime = new Date(a.createdAt ?? 0).getTime();
+      const bTime = new Date(b.createdAt ?? 0).getTime();
+      return (aTime - bTime) * direction;
+    });
+  }
+
+  function restorePendingDeleteBatch(batch: PendingMessageDeleteBatch) {
+    setMessages((prev) => mergeCollectionByCreatedAt(prev, batch.messages, "asc"));
+    setSearchHits((prev) => mergeCollectionByCreatedAt(prev, batch.searchHits, "desc"));
+    setProfileMediaItems((prev) => mergeCollectionByCreatedAt(prev, batch.profileMediaItems, "desc"));
+    setImageViewerItems((prev) => mergeCollectionByCreatedAt(prev, batch.imageViewerItems, "desc"));
+  }
+
+  async function finalizePendingDeleteBatch(batch: PendingMessageDeleteBatch) {
+    clearPendingDeleteTimers();
+    setPendingDeleteBatch((current) => (current?.token === batch.token ? null : current));
+    setPendingDeleteCountdownMs(0);
+
+    try {
+      await api.post("/messages/hide-many", { messageIds: batch.ids });
+      await loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
+      showToast(
+        `${batch.ids.length} ${batch.ids.length === 1 ? "mensagem excluída" : "mensagens excluídas"}.`,
+        2000
+      );
+    } catch {
+      restorePendingDeleteBatch(batch);
+      await loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
+      setSendErr("Não foi possível apagar as mensagens agora.");
+    }
+  }
+
+  function undoPendingDeleteBatch() {
+    const batch = pendingDeleteBatch;
+    if (!batch) return;
+    clearPendingDeleteTimers();
+    setPendingDeleteBatch(null);
+    setPendingDeleteCountdownMs(0);
+    restorePendingDeleteBatch(batch);
+    void loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
+  }
+
+  function queuePendingDelete(messageIds: string[]) {
+    const ids = Array.from(new Set(messageIds));
+    if (!ids.length) return;
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais mensagens.", 2200);
+      return;
+    }
+
+    const idSet = new Set(ids);
+    const batch: PendingMessageDeleteBatch = {
+      token: Date.now(),
+      ids,
+      messages: messages.filter((item) => idSet.has(item.id)),
+      searchHits: searchHits.filter((item) => idSet.has(item.id)),
+      profileMediaItems: profileMediaItems.filter((item) => idSet.has(item.id)),
+      imageViewerItems: imageViewerItems.filter((item) => idSet.has(item.id)),
+      conversationId: activeConvIdRef.current ?? activeConv?.id ?? null,
+      expiresAt: Date.now() + 5000,
+    };
+
+    removeMessagesFromLocalState(ids);
+    stopMultiDeleteMode();
+    setFavoriteDeletePrompt(null);
+    clearPendingDeleteTimers();
+    setPendingDeleteBatch(batch);
+    setPendingDeleteCountdownMs(5000);
+    pendingDeleteCountdownTimerRef.current = window.setInterval(() => {
+      setPendingDeleteCountdownMs(Math.max(0, batch.expiresAt - Date.now()));
+    }, 100);
+    pendingDeleteFinalizeTimerRef.current = window.setTimeout(() => {
+      void finalizePendingDeleteBatch(batch);
+    }, 5000);
+    void loadConversations(batch.conversationId ?? activeConvIdRef.current ?? undefined);
+  }
+
+  function startMultiDeleteFromMessage(message: Message) {
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais mensagens.", 2200);
+      return;
+    }
+    setActionMenuMsgId(null);
+    setActionMenuPosition(null);
+    setConversationMenuId(null);
+    setReactionBarMsgId(null);
+    setReactionPickerMsgId(null);
+    setFavoriteDeletePrompt(null);
+    setMultiDeleteMode(true);
+    setSelectedMessageIds([message.id]);
+  }
+
+  function clearPendingConversationTimers() {
+    if (pendingConversationFinalizeTimerRef.current) {
+      window.clearTimeout(pendingConversationFinalizeTimerRef.current);
+      pendingConversationFinalizeTimerRef.current = null;
+    }
+    if (pendingConversationCountdownTimerRef.current) {
+      window.clearInterval(pendingConversationCountdownTimerRef.current);
+      pendingConversationCountdownTimerRef.current = null;
+    }
+  }
+
+  function stopConversationSelectMode() {
+    setConversationSelectMode(false);
+    setSelectedConversationIds([]);
+    setRemoveChatsPrompt(null);
+  }
+
+  function toggleConversationSelection(conversationId: string) {
+    setSelectedConversationIds((prev) =>
+      prev.includes(conversationId) ? prev.filter((id) => id !== conversationId) : [...prev, conversationId]
+    );
+  }
+
+  function toggleSelectAllConversations() {
+    setSelectedConversationIds((prev) => (prev.length === conversations.length ? [] : conversations.map((conv) => conv.id)));
+  }
+
+  function captureConversationUiSnapshot(): ConversationUiSnapshot {
+    return {
+      conversations,
+      activeConv,
+      messages,
+      searchHits,
+      profileMediaItems,
+      imageViewerItems,
+      newMsgsCount,
+      showJumpNew,
+      unreadAnchorMessageId,
+      showJumpUnread,
+      profileOpen,
+      searchOpen,
+    };
+  }
+
+  function restoreConversationUiSnapshot(snapshot: ConversationUiSnapshot) {
+    setConversations(sortConversationItems(snapshot.conversations));
+    activeConvIdRef.current = snapshot.activeConv?.id ?? null;
+    setActiveConv(snapshot.activeConv);
+    setMessages(snapshot.messages);
+    setSearchHits(snapshot.searchHits);
+    setProfileMediaItems(snapshot.profileMediaItems);
+    setImageViewerItems(snapshot.imageViewerItems);
+    setNewMsgsCount(snapshot.newMsgsCount);
+    setShowJumpNew(snapshot.showJumpNew);
+    setUnreadAnchorMessageId(snapshot.unreadAnchorMessageId);
+    setShowJumpUnread(snapshot.showJumpUnread);
+    setProfileOpen(snapshot.profileOpen);
+    setSearchOpen(snapshot.searchOpen);
+    if (snapshot.activeConv?.id) {
+      joinConversationRoom(snapshot.activeConv.id);
+    }
+  }
+
+  function hideActiveConversationLocally() {
+    activeConvIdRef.current = null;
+    setActiveConv(null);
+    setMessages([]);
+    setSearchHits([]);
+    setNewMsgsCount(0);
+    setShowJumpNew(false);
+    setUnreadAnchorMessageId(null);
+    setShowJumpUnread(false);
+    setProfileOpen(false);
+    setSearchOpen(false);
+  }
+
+  async function finalizePendingConversationHide(batch: PendingConversationHideBatch) {
+    clearPendingConversationTimers();
+    setPendingConversationHideBatch((current) => (current?.token === batch.token ? null : current));
+    setPendingConversationCountdownMs(0);
+
+    try {
+      await Promise.all(batch.ids.map((conversationId) => api.delete(`/conversations/${conversationId}`)));
+      await loadConversations(activeConvIdRef.current ?? undefined);
+      showToast(
+        `${batch.ids.length} ${batch.ids.length === 1 ? "chat apagado" : "chats apagados"}.`,
+        2000
+      );
+    } catch {
+      restoreConversationUiSnapshot(batch.snapshot);
+      await loadConversations(activeConvIdRef.current ?? undefined);
+      setSendErr("Não foi possível remover os chats agora.");
+    }
+  }
+
+  function undoPendingConversationHide() {
+    const batch = pendingConversationHideBatch;
+    if (!batch) return;
+    clearPendingConversationTimers();
+    setPendingConversationHideBatch(null);
+    setPendingConversationCountdownMs(0);
+    restoreConversationUiSnapshot(batch.snapshot);
+  }
+
+  function queuePendingConversationHide(conversationIds: string[]) {
+    const ids = Array.from(new Set(conversationIds));
+    if (!ids.length) return;
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais chats.", 2200);
+      return;
+    }
+
+    const snapshot = captureConversationUiSnapshot();
+    const idSet = new Set(ids);
+    const batch: PendingConversationHideBatch = {
+      token: Date.now(),
+      ids,
+      snapshot,
+      expiresAt: Date.now() + 5000,
+    };
+
+    setConversations((prev) => prev.filter((conv) => !idSet.has(conv.id)));
+    if (snapshot.activeConv?.id && idSet.has(snapshot.activeConv.id)) {
+      hideActiveConversationLocally();
+    }
+
+    setConversationMenuId(null);
+    stopConversationSelectMode();
+    clearPendingConversationTimers();
+    setPendingConversationHideBatch(batch);
+    setPendingConversationCountdownMs(5000);
+    pendingConversationCountdownTimerRef.current = window.setInterval(() => {
+      setPendingConversationCountdownMs(Math.max(0, batch.expiresAt - Date.now()));
+    }, 100);
+    pendingConversationFinalizeTimerRef.current = window.setTimeout(() => {
+      void finalizePendingConversationHide(batch);
+    }, 5000);
+  }
+
+  function startConversationRemovalSelection(conversationId: string) {
+    if (multiDeleteMode || pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais chats.", 2200);
+      return;
+    }
+    setActionMenuMsgId(null);
+    setActionMenuPosition(null);
+    setConversationMenuId(null);
+    setConversationSelectMode(true);
+    setSelectedConversationIds([conversationId]);
+  }
+
+  function requestRemoveSelectedConversations() {
+    if (!selectedConversations.length) return;
+    setRemoveChatsPrompt({
+      ids: selectedConversations.map((conversation) => conversation.id),
+      totalCount: selectedConversations.length,
+    });
+  }
+
+  function confirmRemoveSelectedConversations() {
+    const prompt = removeChatsPrompt;
+    if (!prompt) return;
+    setRemoveChatsPrompt(null);
+    queuePendingConversationHide(prompt.ids);
+  }
+
+  async function finalizePendingConversationClear(batch: PendingConversationClearBatch) {
+    clearPendingConversationTimers();
+    setPendingConversationClearBatch((current) => (current?.token === batch.token ? null : current));
+    setPendingConversationCountdownMs(0);
+
+    try {
+      if (batch.keepFavorites) {
+        const favoriteIdSet = new Set(batch.favoriteIds);
+        const idsToHide =
+          batch.messageIds.length > 0
+            ? batch.messageIds.filter((messageId) => !favoriteIdSet.has(messageId))
+            : [];
+
+        if (idsToHide.length) {
+          await api.post("/messages/hide-many", { messageIds: idsToHide });
+        } else {
+          await api.post(`/conversations/${batch.conversationId}/clear`, {
+            keepFavorites: true,
+          });
+        }
+      } else {
+        await api.post(`/conversations/${batch.conversationId}/clear`);
+      }
+      await loadConversations(activeConvIdRef.current ?? undefined);
+      showToast(
+        batch.keepFavorites
+          ? "Conversa limpa, favoritas mantidas."
+          : "Conversa limpa para você.",
+        2000
+      );
+    } catch {
+      restoreConversationUiSnapshot(batch.snapshot);
+      await loadConversations(activeConvIdRef.current ?? undefined);
+      setSendErr("Não foi possível limpar a conversa agora.");
+    }
+  }
+
+  function undoPendingConversationClear() {
+    const batch = pendingConversationClearBatch;
+    if (!batch) return;
+    clearPendingConversationTimers();
+    setPendingConversationClearBatch(null);
+    setPendingConversationCountdownMs(0);
+    restoreConversationUiSnapshot(batch.snapshot);
+  }
+
+  function queuePendingConversationClear(
+    conversationId: string,
+    conversationName: string,
+    totalCount: number,
+    favoriteCount: number,
+    messageIds: string[],
+    favoriteIds: string[],
+    keepFavorites: boolean
+  ) {
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de limpar outra conversa.", 2200);
+      return;
+    }
+
+    const snapshot = captureConversationUiSnapshot();
+    const isActiveConversation = snapshot.activeConv?.id === conversationId;
+    const remainingMessages =
+      isActiveConversation && keepFavorites ? snapshot.messages.filter((message) => message.isFavorited) : [];
+    const nextLastMessage = isActiveConversation
+      ? remainingMessages[remainingMessages.length - 1] ?? null
+      : null;
+    const batch: PendingConversationClearBatch = {
+      token: Date.now(),
+      conversationId,
+      conversationName,
+      keepFavorites,
+      totalCount,
+      favoriteCount,
+      messageIds,
+      favoriteIds,
+      snapshot,
+      expiresAt: Date.now() + 5000,
+    };
+
+    setConversations((prev) =>
+      sortConversationItems(
+        prev.map((conv) =>
+          conv.id === conversationId
+            ? {
+                ...conv,
+                lastMessage: keepFavorites ? nextLastMessage : null,
+                unreadCount: 0,
+              }
+            : conv
+        )
+      )
+    );
+
+    if (isActiveConversation) {
+      setMessages(keepFavorites ? remainingMessages : []);
+      setSearchHits((prev) => (keepFavorites ? prev.filter((message) => message.isFavorited) : []));
+      setProfileMediaItems((prev) =>
+        keepFavorites ? prev.filter((message) => message.isFavorited) : []
+      );
+      setImageViewerItems((prev) =>
+        keepFavorites ? prev.filter((message) => message.isFavorited) : []
+      );
+      setNewMsgsCount(0);
+      setShowJumpNew(false);
+      setUnreadAnchorMessageId(null);
+      setShowJumpUnread(false);
+      if (!keepFavorites) {
+        setReplyTo(null);
+      }
+    }
+
+    setConversationMenuId(null);
+    setConversationClearPrompt(null);
+    clearPendingConversationTimers();
+    setPendingConversationClearBatch(batch);
+    setPendingConversationCountdownMs(5000);
+    pendingConversationCountdownTimerRef.current = window.setInterval(() => {
+      setPendingConversationCountdownMs(Math.max(0, batch.expiresAt - Date.now()));
+    }, 100);
+    pendingConversationFinalizeTimerRef.current = window.setTimeout(() => {
+      void finalizePendingConversationClear(batch);
+    }, 5000);
+  }
+
+  async function requestClearConversation(conversationId: string, conversationName: string) {
+    if (multiDeleteMode || conversationSelectMode || pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de limpar outra conversa.", 2200);
+      return;
+    }
+
+    try {
+      let summary: {
+        totalCount: number;
+        favoriteCount: number;
+        messageIds: string[];
+        favoriteIds: string[];
+      } | null = null;
+
+      try {
+        const res = await api.get<ConversationClearSummaryResponse>(`/conversations/${conversationId}/clear-summary`);
+        summary = {
+          totalCount: res.data.totalCount,
+          favoriteCount: res.data.favoriteCount,
+          messageIds: [],
+          favoriteIds: [],
+        };
+      } catch (error: any) {
+        if (Number(error?.response?.status ?? 0) !== 404) throw error;
+
+        const items: Message[] = [];
+        let cursor: string | null = null;
+        let hasMore = true;
+
+        while (hasMore) {
+          const params: { cursor?: string; take: number } = { take: 100 };
+          if (cursor) params.cursor = cursor;
+          const pageResponse: { data: MessagesResponse } = await api.get(
+            `/conversations/${conversationId}/messages`,
+            { params }
+          );
+          const pageItems = pageResponse.data.items ?? [];
+          items.unshift(...pageItems);
+          cursor = pageResponse.data.nextCursor ?? null;
+          hasMore = !!cursor && pageItems.length > 0;
+        }
+
+        summary = {
+          totalCount: items.length,
+          favoriteCount: items.filter((item) => item.isFavorited).length,
+          messageIds: items.map((item) => item.id),
+          favoriteIds: items.filter((item) => item.isFavorited).map((item) => item.id),
+        };
+      }
+
+      if (!summary.totalCount) {
+        setConversationMenuId(null);
+        showToast("A conversa já está vazia.", 1800);
+        return;
+      }
+
+      setConversationMenuId(null);
+      setConversationClearPrompt({
+        conversationId,
+        conversationName,
+        totalCount: summary.totalCount,
+        favoriteCount: summary.favoriteCount,
+        messageIds: summary.messageIds,
+        favoriteIds: summary.favoriteIds,
+      });
+    } catch {
+      setSendErr("Não foi possível preparar a limpeza da conversa.");
+    }
+  }
+
+  function confirmClearConversation(keepFavorites: boolean) {
+    const prompt = conversationClearPrompt;
+    if (!prompt) return;
+    queuePendingConversationClear(
+      prompt.conversationId,
+      prompt.conversationName,
+      prompt.totalCount,
+      prompt.favoriteCount,
+      prompt.messageIds,
+      prompt.favoriteIds,
+      keepFavorites
+    );
+  }
+
+  function startRemovedNoticesLoading() {
+    if (removalNoticesProgressTimerRef.current) {
+      window.clearInterval(removalNoticesProgressTimerRef.current);
+      removalNoticesProgressTimerRef.current = null;
+    }
+    if (removalNoticesFinishTimerRef.current) {
+      window.clearTimeout(removalNoticesFinishTimerRef.current);
+      removalNoticesFinishTimerRef.current = null;
+    }
+    setRemovalNoticesProgress(8);
+    setRemovalNoticesLoading(true);
+    removalNoticesProgressTimerRef.current = window.setInterval(() => {
+      setRemovalNoticesProgress((prev) => {
+        if (prev >= 92) return prev;
+        const next = prev + (prev < 48 ? 11 : prev < 74 ? 7 : 3);
+        return Math.min(next, 92);
+      });
+    }, 120);
+  }
+
+  function finishRemovedNoticesLoading() {
+    if (removalNoticesProgressTimerRef.current) {
+      window.clearInterval(removalNoticesProgressTimerRef.current);
+      removalNoticesProgressTimerRef.current = null;
+    }
+    setRemovalNoticesProgress(100);
+    removalNoticesFinishTimerRef.current = window.setTimeout(() => {
+      setRemovalNoticesLoading(false);
+      setRemovalNoticesProgress(0);
+      removalNoticesFinishTimerRef.current = null;
+    }, 240);
   }
 
   async function copyText(v: string, successMessage = "Copiado") {
@@ -1400,12 +3981,23 @@ export function ChatPage() {
   function attachmentDownloadName(message: Partial<Message>) {
     const normalized = normalizeAttachmentDisplayName(message.attachmentName);
     if (normalized) return normalized;
+    if (isAudioMessageAttachment(message) || isAudioDocumentAttachment(message)) return "audio";
     if (isVideoAttachment(message)) return "video";
     if (isImageAttachment(message)) return "imagem";
     return "arquivo";
   }
 
   async function triggerBrowserDownload(url: string, filename: string) {
+    const desktopApi = window.bhashDesktop;
+    if (desktopApi?.isDesktop && typeof desktopApi.downloadFile === "function") {
+      const result = await desktopApi.downloadFile({ url, filename });
+      if (!result?.ok) {
+        throw new Error(result?.error || "Não foi possível baixar o arquivo.");
+      }
+      showToast("Baixado na pasta Downloads");
+      return;
+    }
+
     try {
       const res = await fetch(url, { credentials: "include" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1418,6 +4010,7 @@ export function ChatPage() {
       a.click();
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+      showToast("Download iniciado");
       return;
     } catch {}
 
@@ -1429,12 +4022,17 @@ export function ChatPage() {
     document.body.appendChild(fallback);
     fallback.click();
     fallback.remove();
+    showToast("Download iniciado");
   }
 
   async function downloadAttachment(message: Partial<Message>) {
     const absoluteUrl = toAbsoluteUrl(message.attachmentUrl);
     if (!absoluteUrl) return;
-    await triggerBrowserDownload(absoluteUrl, attachmentDownloadName(message));
+    try {
+      await triggerBrowserDownload(absoluteUrl, attachmentDownloadName(message));
+    } catch {
+      setSendErr("Não foi possível baixar o arquivo agora.");
+    }
   }
 
   function removeMessagesFromLocalState(messageIds: string[]) {
@@ -1448,18 +4046,30 @@ export function ChatPage() {
     if (currentViewerItem && ids.has(currentViewerItem.id)) closeImageViewer();
   }
 
-  async function hideMessageForMe(message: Message) {
-    const ok = window.confirm("Apagar esta mensagem apenas do seu chat?");
+  async function hideRemovedAttachmentNoticesForMe(conversationId?: string | null) {
+    const targetConversationId = conversationId ?? activeConvIdRef.current ?? null;
+    if (!targetConversationId) return;
+    const ok = window.confirm("Excluir do seu chat os avisos de arquivos apagados desta conversa?");
     if (!ok) return;
 
+    startRemovedNoticesLoading();
     try {
-      await api.delete(`/messages/${message.id}`);
-      removeMessagesFromLocalState([message.id]);
+      const res = await api.post<{ ok: true; messageIds?: string[] }>(
+        `/conversations/${targetConversationId}/hide-removed-notices`
+      );
+      const hiddenIds = Array.isArray(res.data?.messageIds)
+        ? res.data.messageIds
+        : messages.filter((item) => item.conversationId === targetConversationId && isRemovedAttachmentNoticeMessage(item)).map((item) => item.id);
+      removeMessagesFromLocalState(hiddenIds);
       setActionMenuMsgId(null);
       setReactionBarMsgId(null);
       setReactionPickerMsgId(null);
       await loadConversations(activeConvIdRef.current ?? undefined);
-    } catch {}
+      finishRemovedNoticesLoading();
+    } catch {
+      finishRemovedNoticesLoading();
+      setSendErr("Não foi possível excluir os avisos agora.");
+    }
   }
 
   function mergeMessageIntoList(message: Message) {
@@ -1474,15 +4084,29 @@ export function ChatPage() {
 
 
   async function loadMe() {
-    const res = await api.get<Me>("/auth/me");
-    setMe(res.data);
+    try {
+      const res = await api.get<Me>("/auth/me");
+      setMe(res.data);
+    } catch (e: any) {
+      if (isAuthRequestError(e)) {
+        logout();
+        return;
+      }
+      throw e;
+    }
   }
 
   async function loadConversations(selectConversationId?: string) {
     setLoadingConvs(true);
+    setConversationsError(null);
     try {
       const res = await api.get<ConversationsResponse>("/conversations");
-      const items = sortConversationItems(res.data.items ?? []);
+      const items = sortConversationItems(
+        applyLocalReadMarkersToConversations(
+          res.data.items ?? [],
+          conversationReadMarkersRef.current
+        )
+      );
       setConversations(items);
 
       if (selectConversationId) {
@@ -1491,23 +4115,55 @@ export function ChatPage() {
       }
 
       return items;
+    } catch (e: any) {
+      if (isAuthRequestError(e)) {
+        logout();
+        return conversationsRef.current;
+      }
+
+      const apiMessage = e?.response?.data?.message;
+      setConversationsError(
+        typeof apiMessage === "string" && apiMessage.trim()
+          ? apiMessage.trim()
+          : "Não foi possível carregar as conversas agora."
+      );
+      throw e;
     } finally {
       setLoadingConvs(false);
     }
   }
 
   async function loadMessages(conversationId: string, cursor?: string | null, appendTop = false) {
-    if (!conversationId) return;
+    if (!conversationId) return [];
+    if (appendTop && loadingOlderMsgsRef.current) return [];
 
-    setLoadingMsgs(true);
+    const currentList = msgListRef.current;
+    const previousScrollMetrics =
+      appendTop && currentList
+        ? {
+            scrollHeight: currentList.scrollHeight,
+            scrollTop: currentList.scrollTop,
+          }
+        : null;
+
+    if (appendTop) {
+      loadingOlderMsgsRef.current = true;
+      setLoadingOlderMsgs(true);
+    } else {
+      setLoadingMsgs(true);
+    }
     setMessagesErr(null);
     try {
       const res = await api.get<MessagesResponse>(`/conversations/${conversationId}/messages`, {
         params: {
           ...(cursor ? { cursor } : {}),
-          take: 60,
+          take: cursor ? OLDER_MESSAGES_PAGE_SIZE : INITIAL_MESSAGES_PAGE_SIZE,
         },
       });
+
+      if (activeConvIdRef.current !== conversationId) {
+        return [];
+      }
 
       const items = res.data.items ?? [];
 
@@ -1525,20 +4181,42 @@ export function ChatPage() {
       });
 
       setMessagesNextCursor(res.data.nextCursor ?? null);
+      messagesNextCursorRef.current = res.data.nextCursor ?? null;
 
-      if (!appendTop) scrollToBottom();
+      if (appendTop && previousScrollMetrics) {
+        requestAnimationFrame(() => {
+          const el = msgListRef.current;
+          if (!el) return;
+          const delta = el.scrollHeight - previousScrollMetrics.scrollHeight;
+          el.scrollTop = previousScrollMetrics.scrollTop + delta;
+        });
+      } else if (!appendTop) {
+        scrollToBottom();
+      }
       return items;
     } catch (e: any) {
       if (!appendTop) setMessages([]);
       setMessagesErr(e?.response?.data?.message ?? "Falha ao carregar mensagens");
       return [];
     } finally {
-      setLoadingMsgs(false);
+      if (appendTop) {
+        loadingOlderMsgsRef.current = false;
+        setLoadingOlderMsgs(false);
+      } else {
+        setLoadingMsgs(false);
+      }
     }
+  }
+
+  async function loadOlderMessages(conversationId: string) {
+    const cursor = messagesNextCursorRef.current;
+    if (!conversationId || !cursor || loadingOlderMsgsRef.current || loadingMsgs) return [];
+    return loadMessages(conversationId, cursor, true);
   }
 
   async function openConversation(conv: ConversationListItem, focusMessageId?: string | null) {
     const unreadCountBeforeOpen = Math.max(0, conv.unreadCount ?? 0);
+    activeConvIdRef.current = conv.id;
     setActiveConv(conv);
     isMsgListNearBottomRef.current = true;
     setSearchOpen(false);
@@ -1549,6 +4227,7 @@ export function ChatPage() {
     setMessagesErr(null);
     setSendErr(null);
     setReplyTo(null);
+    setAttachMenuOpen(false);
     setActionMenuMsgId(null);
     setConversationMenuId(null);
     setUnreadAnchorMessageId(null);
@@ -1563,25 +4242,21 @@ export function ChatPage() {
         )
       )
     );
+    rememberConversationRead(conv.id, null, conv);
 
     joinConversationRoom(conv.id);
 
     const loadedMessages = (await loadMessages(conv.id)) ?? [];
+    rememberConversationRead(conv.id, null, conv, loadedMessages);
     const unreadAnchorId = resolveUnreadAnchorMessageId(loadedMessages, unreadCountBeforeOpen);
     setUnreadAnchorMessageId(unreadAnchorId);
     hasSeenUnreadMarkerRef.current = false;
-    await markConversationRead(conv.id);
+    await markConversationRead(conv.id, null, conv, loadedMessages);
     if (focusMessageId) {
       const msgExists = loadedMessages.some((msg) => msg.id === focusMessageId);
       if (msgExists) {
         requestAnimationFrame(() => {
-          const container = msgListRef.current;
-          if (!container) return;
-          const row = container.querySelector(`[data-mid="${focusMessageId}"]`) as HTMLElement | null;
-          if (!row) return;
-          row.scrollIntoView({ behavior: "smooth", block: "center" });
-          row.classList.add("chat-msg-flash");
-          window.setTimeout(() => row.classList.remove("chat-msg-flash"), 1200);
+          focusRenderedMessage(focusMessageId);
         });
       } else {
         await jumpToMessageById(focusMessageId);
@@ -1616,30 +4291,325 @@ export function ChatPage() {
       const filtered = me?.id ? list.filter((u) => u.id !== me.id) : list;
       setUsers(filtered);
     } catch (e: any) {
+      if (isAuthRequestError(e)) {
+        logout();
+        return;
+      }
       setPickerError(e?.response?.data?.message ?? e?.message ?? "Falha ao carregar colaboradores");
     } finally {
       setLoadingUsers(false);
     }
   }
 
-  async function startDirect(otherUserId: string) {
-    const res = await api.post<DirectConversationResponse>("/conversations/direct", { otherUserId });
-    const created = res.data.conversation;
-
+  function closePicker() {
     setPickerOpen(false);
-    await loadConversations(created.id);
+    setPickerMode("direct");
+    setPickerError(null);
+    setPickerSubmitting(false);
+    setPickerTitle("");
+    setPickerSelectedUserIds([]);
+    setPickerSelectedCompanyIds([]);
+    setPickerSelectedDepartmentIds([]);
+    setPickerIncludeAllUsers(false);
+    setPickerConversationId(null);
+    setUserSearch("");
+    setUserCompanyFilter("");
+    setUserDepartmentFilter("");
+  }
 
-    const currentMeId = me?.id;
-    const otherUser =
-      currentMeId && created.userA.id === currentMeId ? created.userB : created.userA;
+  function openCreatePicker(mode: CreatePickerMode, conversation?: ConversationListItem | null) {
+    setCreateMenuOpen(false);
+    setPickerMode(mode);
+    setPickerOpen(true);
+    setPickerError(null);
+    setPickerSubmitting(false);
+    setPickerTitle(mode === "group-members" ? conversationDisplayName(conversation) : "");
+    setPickerSelectedUserIds([]);
+    setPickerSelectedCompanyIds([]);
+    setPickerSelectedDepartmentIds([]);
+    setPickerIncludeAllUsers(false);
+    setPickerConversationId(conversation?.id ?? null);
+    setUserSearch("");
+    setUserCompanyFilter("");
+    setUserDepartmentFilter("");
+  }
 
-    await openConversation({
-      id: created.id,
-      createdAt: created.createdAt,
-      updatedAt: created.updatedAt,
-      otherUser,
-      lastMessage: null,
-    });
+  function togglePickerUserSelection(userId: string) {
+    setPickerSelectedUserIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    );
+  }
+
+  function togglePickerCompanySelection(companyId: string) {
+    setPickerSelectedCompanyIds((prev) =>
+      prev.includes(companyId) ? prev.filter((id) => id !== companyId) : [...prev, companyId]
+    );
+  }
+
+  function togglePickerDepartmentSelection(departmentId: string) {
+    setPickerSelectedDepartmentIds((prev) =>
+      prev.includes(departmentId) ? prev.filter((id) => id !== departmentId) : [...prev, departmentId]
+    );
+  }
+
+  async function applyCreatedConversation(conversation: ConversationListItem) {
+    closePicker();
+    setConversations((prev) => upsertConversationItem(prev, conversation));
+    setConversationsError(null);
+    try {
+      const items = await loadConversations(conversation.id);
+      const resolved = items?.find((item) => item.id === conversation.id) ?? conversation;
+      await openConversation(resolved);
+    } catch {
+      await openConversation(conversation);
+      setSendErr("A conversa foi criada, mas a lista ainda não conseguiu atualizar.");
+    }
+  }
+
+  function applyConversationUpdateLocally(conversation: ConversationListItem) {
+    setConversations((prev) => upsertConversationItem(prev, conversation));
+    if (activeConvIdRef.current === conversation.id) {
+      setActiveConv(conversation);
+    }
+    setConversationDetails((prev) => (prev?.id === conversation.id ? conversation : prev));
+  }
+
+  function populateConversationDetailsForm(nextConversation: ConversationListItem) {
+    setConversationDetails(nextConversation);
+    setConversationDetailsTitle(nextConversation.rawTitle?.trim() || nextConversation.title?.trim() || "");
+    setConversationDetailsSelectedUserIds((nextConversation.broadcastTargets ?? []).map((user) => user.id));
+    setConversationDetailsSelectedCompanyIds((nextConversation.broadcastTargetCompanies ?? []).map((item) => item.id));
+    setConversationDetailsSelectedDepartmentIds(
+      (nextConversation.broadcastTargetDepartments ?? []).map((item) => item.id)
+    );
+    setConversationDetailsExcludedUserIds((nextConversation.broadcastExcludedUsers ?? []).map((user) => user.id));
+    setConversationDetailsIncludeAllUsers(!!nextConversation.broadcastIncludeAllUsers);
+  }
+
+  async function loadConversationDetailsDrawer(conversation?: ConversationListItem | null) {
+    const target = conversation ?? activeConv;
+    if (!target?.id) return;
+
+    const fallbackConversation = buildConversationDetailsFallback(target, users);
+    setConversationDetailsOpen(true);
+    setConversationDetailsLoading(true);
+    setConversationDetailsError(null);
+    setConversationDetailsLegacyMode(false);
+    populateConversationDetailsForm(fallbackConversation);
+    if (conversationKind(target) === "BROADCAST" && users.length === 0) {
+      void loadUsers();
+    }
+
+    try {
+      const res = await api.get<ConversationDetailsResponse>(`/conversations/${target.id}/details`);
+      const nextConversation = res.data.conversation;
+      populateConversationDetailsForm(nextConversation);
+      applyConversationUpdateLocally(nextConversation);
+    } catch (e: any) {
+      if (Number(e?.response?.status ?? 0) === 404 && conversationKind(target) !== "DIRECT") {
+        setConversationDetailsLegacyMode(true);
+        populateConversationDetailsForm(fallbackConversation);
+        applyConversationUpdateLocally(fallbackConversation);
+      } else {
+        setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível carregar os dados da conversa.");
+      }
+    } finally {
+      setConversationDetailsLoading(false);
+    }
+  }
+
+  function toggleConversationDetailsCompanySelection(companyId: string) {
+    setConversationDetailsSelectedCompanyIds((prev) =>
+      prev.includes(companyId) ? prev.filter((id) => id !== companyId) : [...prev, companyId]
+    );
+  }
+
+  function toggleConversationDetailsDepartmentSelection(departmentId: string) {
+    setConversationDetailsSelectedDepartmentIds((prev) =>
+      prev.includes(departmentId) ? prev.filter((id) => id !== departmentId) : [...prev, departmentId]
+    );
+  }
+
+  function addUserToConversationDetails(userId: string) {
+    setConversationDetailsSelectedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    setConversationDetailsExcludedUserIds((prev) => prev.filter((id) => id !== userId));
+  }
+
+  function removeUserFromConversationDetails(userId: string) {
+    setConversationDetailsSelectedUserIds((prev) => prev.filter((id) => id !== userId));
+    setConversationDetailsExcludedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+  }
+
+  async function saveBroadcastConversationDetails() {
+    const conversation = conversationDetails;
+    if (!conversation?.id || conversationKind(conversation) !== "BROADCAST") return;
+    if (conversationDetailsLegacyMode) {
+      setConversationDetailsError("Atualize o servidor para editar essa lista por aqui.");
+      return;
+    }
+
+    setConversationDetailsSaving(true);
+    setConversationDetailsError(null);
+    try {
+      const res = await api.patch<ConversationDetailsResponse>(`/conversations/${conversation.id}/broadcast`, {
+        title: conversationDetailsTitle,
+        targetUserIds: conversationDetailsSelectedUserIds,
+        companyIds: conversationDetailsSelectedCompanyIds,
+        departmentIds: conversationDetailsSelectedDepartmentIds,
+        excludedUserIds: conversationDetailsExcludedUserIds,
+        includeAllUsers: conversationDetailsIncludeAllUsers,
+      });
+      const updatedConversation = res.data.conversation;
+      setConversationDetailsLegacyMode(false);
+      populateConversationDetailsForm(updatedConversation);
+      applyConversationUpdateLocally(updatedConversation);
+    } catch (e: any) {
+      setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível salvar a lista agora.");
+    } finally {
+      setConversationDetailsSaving(false);
+    }
+  }
+
+  async function startDirect(otherUserId: string) {
+    if (pickerSubmitting) return;
+    setPickerSubmitting(true);
+    setPickerError(null);
+    try {
+      const res = await api.post<ConversationMutationResponse>("/conversations/direct", {
+        otherUserId,
+      });
+      await applyCreatedConversation(res.data.conversation);
+    } catch (e: any) {
+      setPickerError(pickerRequestErrorMessage(e, "Não foi possível abrir a conversa."));
+    } finally {
+      setPickerSubmitting(false);
+    }
+  }
+
+  async function createGroupFromPicker() {
+    const title = pickerTitle.trim();
+    if (title.length < 2) {
+      setPickerError("Informe um nome para o grupo.");
+      return;
+    }
+    if (!pickerSelectedUserIds.length) {
+      setPickerError("Selecione pelo menos uma pessoa para o grupo.");
+      return;
+    }
+
+    setPickerSubmitting(true);
+    setPickerError(null);
+    try {
+      const res = await api.post<ConversationMutationResponse>("/conversations/group", {
+        title,
+        memberIds: pickerSelectedUserIds,
+      });
+      await applyCreatedConversation(res.data.conversation);
+    } catch (e: any) {
+      setPickerError(pickerRequestErrorMessage(e, "Não foi possível criar o grupo."));
+    } finally {
+      setPickerSubmitting(false);
+    }
+  }
+
+  async function createBroadcastListFromPicker() {
+    const title = pickerTitle.trim();
+    if (title.length < 2) {
+      setPickerError("Informe um nome para a lista de transmissão.");
+      return;
+    }
+    if (!pickerBroadcastHasAudience) {
+      setPickerError("Selecione contatos ou marque uma regra automática para a lista.");
+      return;
+    }
+
+    setPickerSubmitting(true);
+    setPickerError(null);
+    try {
+      const res = await api.post<ConversationMutationResponse>("/conversations/broadcast", {
+        title,
+        targetUserIds: pickerSelectedUserIds,
+        companyIds: pickerSelectedCompanyIds,
+        departmentIds: pickerSelectedDepartmentIds,
+        includeAllUsers: pickerIncludeAllUsers,
+      });
+      await applyCreatedConversation(res.data.conversation);
+    } catch (e: any) {
+      setPickerError(pickerRequestErrorMessage(e, "Não foi possível criar a lista de transmissão."));
+    } finally {
+      setPickerSubmitting(false);
+    }
+  }
+
+  async function addGroupParticipantsFromPicker() {
+    const conversationId = pickerConversationId;
+    if (!conversationId) return;
+    if (!pickerSelectedUserIds.length) {
+      setPickerError("Selecione pelo menos uma pessoa para adicionar.");
+      return;
+    }
+
+    setPickerSubmitting(true);
+    setPickerError(null);
+    try {
+      const res = await api.post<ConversationMutationResponse>(`/conversations/${conversationId}/participants`, {
+        userIds: pickerSelectedUserIds,
+      });
+      const updatedConversation = res.data.conversation;
+      closePicker();
+      const items = await loadConversations(conversationId);
+      const resolved = items?.find((item) => item.id === conversationId) ?? updatedConversation;
+      if (activeConvIdRef.current === conversationId) {
+        setActiveConv(resolved);
+      }
+      if (conversationDetails?.id === conversationId) {
+        setConversationDetails(resolved);
+      }
+    } catch (e: any) {
+      setPickerError(pickerRequestErrorMessage(e, "Não foi possível adicionar as pessoas agora."));
+    } finally {
+      setPickerSubmitting(false);
+    }
+  }
+
+  async function submitPicker() {
+    if (pickerMode === "group") {
+      await createGroupFromPicker();
+      return;
+    }
+    if (pickerMode === "broadcast") {
+      await createBroadcastListFromPicker();
+      return;
+    }
+    if (pickerMode === "group-members") {
+      await addGroupParticipantsFromPicker();
+    }
+  }
+
+  async function leaveGroup(conversation: ConversationListItem) {
+    const conversationId = conversation.id;
+    const ok = window.confirm(`Sair de "${conversationDisplayName(conversation)}"?`);
+    if (!ok) return;
+
+    try {
+      const res = await api.post<ConversationDetailsResponse>(`/conversations/${conversationId}/leave`);
+      setConversationMenuId(null);
+      const updatedConversation = res.data.conversation;
+      if (updatedConversation) {
+        applyConversationUpdateLocally(updatedConversation);
+        if (activeConvIdRef.current === conversationId) {
+          setActiveConv(updatedConversation);
+        }
+        if (conversationDetails?.id === conversationId) {
+          setConversationDetails(updatedConversation);
+        }
+      } else if (activeConvIdRef.current === conversationId) {
+        hideActiveConversationLocally();
+      }
+      await loadConversations(activeConvIdRef.current ?? undefined);
+    } catch (e: any) {
+      setSendErr(e?.response?.data?.message ?? e?.message ?? "Não foi possível sair do grupo.");
+    }
   }
 
   async function runSearch(query: string) {
@@ -1698,22 +4668,26 @@ export function ChatPage() {
       const items = res.data.items ?? [];
       setMessages(items);
       setMessagesNextCursor(null);
+      messagesNextCursorRef.current = null;
       setHighlightTerm(termToHighlight);
 
       requestAnimationFrame(() => {
-        const container = msgListRef.current;
-        if (!container) return;
-
-        const row = container.querySelector(`[data-mid="${messageId}"]`) as HTMLElement | null;
-        if (row) {
-          row.scrollIntoView({ behavior: "smooth", block: "center" });
-          row.classList.add("chat-msg-flash");
-          window.setTimeout(() => row.classList.remove("chat-msg-flash"), 1200);
-        }
+        focusRenderedMessage(messageId);
       });
     } catch (e: any) {
       setSearchErr(e?.response?.data?.message ?? "Falha ao abrir ocorrência");
     }
+  }
+
+  async function jumpToReplyReference(replyMessageId?: string | null) {
+    if (!replyMessageId) return;
+
+    setActionMenuMsgId(null);
+    setReactionBarMsgId(null);
+    setReactionPickerMsgId(null);
+
+    if (focusRenderedMessage(replyMessageId)) return;
+    await jumpToMessageById(replyMessageId);
   }
 
   async function jumpToHit(hit: SearchHit) {
@@ -1721,6 +4695,7 @@ export function ChatPage() {
   }
 
   async function loadProfileDrawer() {
+    if (conversationKind(activeConv) !== "DIRECT") return;
     const other = activeConv?.otherUser;
     if (!other?.id || !activeConv?.id) return;
 
@@ -1763,10 +4738,10 @@ export function ChatPage() {
   }
 
   useEffect(() => {
-    if (!profileOpen || !activeConv?.id) return;
+    if ((!profileOpen && !conversationDetailsOpen) || !activeConv?.id) return;
     void loadProfileMedia(profileMediaTab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profileOpen, profileMediaTab, activeConv?.id]);
+  }, [profileOpen, conversationDetailsOpen, profileMediaTab, activeConv?.id]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -1804,6 +4779,30 @@ export function ChatPage() {
     setAttachmentFile(file);
     setAttachmentMode("image");
     setAttachmentPreviewUrl(previewUrl);
+    setAttachMenuOpen(false);
+  }
+
+  function handleAudioPicked(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!isAudioFileLike(file)) {
+      setSendErr("Selecione um arquivo de áudio válido.");
+      e.currentTarget.value = "";
+      return;
+    }
+
+    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+      setSendErr(`O áudio excede o limite de ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`);
+      e.currentTarget.value = "";
+      return;
+    }
+
+    clearComposerAttachment();
+    setAttachmentFile(file);
+    setAttachmentMode("audio");
+    setAttachmentPreviewUrl(URL.createObjectURL(file));
+    setAttachMenuOpen(false);
   }
 
   function handleFilePicked(e: ChangeEvent<HTMLInputElement>) {
@@ -1820,10 +4819,11 @@ export function ChatPage() {
     setAttachmentFile(file);
     setAttachmentMode("file");
     setAttachmentPreviewUrl(null);
+    setAttachMenuOpen(false);
   }
 
   async function sendMessage() {
-    if (!activeConv) return;
+    if (!activeConv || !canSendInActiveConversation) return;
 
     const trimmed = text.trim();
     const hasText = !!trimmed;
@@ -1845,8 +4845,11 @@ export function ChatPage() {
       try {
         const form = new FormData();
         if (trimmed) form.append("body", trimmed);
+        form.append(
+          "uploadMode",
+          attachmentMode === "audio" ? "audio" : attachmentMode === "file" ? "file" : "image"
+        );
         form.append("file", attachmentFile as File);
-        form.append("uploadMode", attachmentMode === "file" ? "file" : "image");
         if (replyTo?.id) form.append("replyToId", replyTo.id);
 
         const res = await api.post<{ ok: true; message: Message }>(
@@ -1857,6 +4860,9 @@ export function ChatPage() {
           }
         );
 
+        if (attachmentMode === "audio") {
+          rememberOptimisticAudioMessageId(res.data.message?.id);
+        }
         mergeMessageIntoList(res.data.message);
         scrollToBottom();
         setShowJumpNew(false);
@@ -1890,6 +4896,7 @@ export function ChatPage() {
     setReplyTo(null);
     clearComposerAttachment();
     setEmojiOpen(false);
+    setAttachMenuOpen(false);
     focusComposerInput();
     void loadConversations(conversationId);
   }
@@ -1918,67 +4925,74 @@ export function ChatPage() {
     } catch {}
   }
 
-  async function deleteSelectedMessages() {
-    if (!selectedMessageIds.length) return;
-    try {
-      await api.post('/messages/hide-many', { messageIds: selectedMessageIds });
-      removeMessagesFromLocalState(selectedMessageIds);
-      setSelectedMessageIds([]);
-      setMultiDeleteMode(false);
-      await loadConversations(activeConvIdRef.current ?? undefined);
-    } catch {}
+  function requestDeleteSelectedMessages() {
+    if (!selectedMessages.length) return;
+
+    const ids = selectedMessages.map((message) => message.id);
+    const favoriteIds = selectedMessages.filter((message) => message.isFavorited).map((message) => message.id);
+
+    if (favoriteIds.length) {
+      setFavoriteDeletePrompt({
+        ids,
+        favoriteIds,
+        totalCount: ids.length,
+        favoriteCount: favoriteIds.length,
+      });
+      return;
+    }
+
+    queuePendingDelete(ids);
   }
 
-  async function clearConversation(conversationId?: string) {
+  function confirmDeleteSelectedMessages(includeFavorites: boolean) {
+    const prompt = favoriteDeletePrompt;
+    if (!prompt) return;
+
+    setFavoriteDeletePrompt(null);
+    const idsToDelete = includeFavorites
+      ? prompt.ids
+      : prompt.ids.filter((id) => !prompt.favoriteIds.includes(id));
+
+    if (!idsToDelete.length) {
+      stopMultiDeleteMode();
+      showToast("Nenhuma mensagem foi apagada.", 2000);
+      return;
+    }
+
+    queuePendingDelete(idsToDelete);
+  }
+
+  async function clearConversation(conversationId?: string, conversationName?: string) {
     const targetId = conversationId ?? activeConv?.id;
     if (!targetId) return;
-
-    try {
-      await api.post(`/conversations/${targetId}/clear`);
-      setConversationMenuId(null);
-      setConversations((prev) =>
-        sortConversationItems(
-          prev.map((conv) =>
-            conv.id === targetId
-              ? { ...conv, lastMessage: null, unreadCount: 0 }
-              : conv
-          )
-        )
-      );
-
-      if (activeConvIdRef.current === targetId) {
-        setMessages([]);
-        setNewMsgsCount(0);
-        setShowJumpNew(false);
-        setUnreadAnchorMessageId(null);
-        setShowJumpUnread(false);
-      }
-
-      await loadConversations(activeConvIdRef.current ?? undefined);
-    } catch {}
+    const resolvedName =
+      conversationName ??
+      conversationDisplayName(conversationsRef.current.find((conv) => conv.id === targetId) ?? null) ??
+      conversationDisplayName(activeConv) ??
+      "Conversa";
+    await requestClearConversation(targetId, resolvedName);
   }
 
   async function removeConversationFromList(conversationId?: string) {
     const targetId = conversationId ?? activeConv?.id;
     if (!targetId) return;
-
-    try {
-      await api.delete(`/conversations/${targetId}`);
-      setConversations((prev) => prev.filter((c) => c.id !== targetId));
-      setConversationMenuId(null);
-
-      if (activeConvIdRef.current === targetId) {
-        setActiveConv(null);
-        setMessages([]);
-        setNewMsgsCount(0);
-        setShowJumpNew(false);
-        setUnreadAnchorMessageId(null);
-        setShowJumpUnread(false);
-      }
-    } catch {}
+    const conversation = conversationsRef.current.find((conv) => conv.id === targetId) ?? activeConv;
+    if (conversationKind(conversation) === "GROUP" && conversation?.isCurrentParticipant !== false) {
+      setSendErr("Saia do grupo antes de remover ele dos seus chats.");
+      return;
+    }
+    startConversationRemovalSelection(targetId);
   }
 
-  async function markConversationRead(conversationId: string) {
+  async function markConversationRead(
+    conversationId: string,
+    readAt?: string | number | Date | null,
+    conversation?: ConversationListItem | null,
+    items?: Message[] | null
+  ) {
+    const currentConversation =
+      conversation ?? conversationsRef.current.find((conv) => conv.id === conversationId) ?? null;
+    rememberConversationRead(conversationId, readAt, currentConversation, items);
     try {
       await api.patch(`/conversations/${conversationId}/read`);
       setConversations((prev) =>
@@ -2032,6 +5046,54 @@ export function ChatPage() {
     }
   }
 
+  async function uploadConversationAvatar(file: File) {
+    const conversation = conversationDetails ?? activeConv;
+    if (!conversation?.id) return;
+    if (conversationDetailsLegacyMode) {
+      setConversationDetailsError("Atualize o servidor para trocar a foto desta conversa.");
+      return;
+    }
+
+    const form = new FormData();
+    form.append("file", file);
+    setConversationAvatarUploading(true);
+    setConversationDetailsError(null);
+    try {
+      const res = await api.post<ConversationDetailsResponse>(`/conversations/${conversation.id}/avatar`, form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setBrokenAvatarUrls(new Set());
+      applyConversationUpdateLocally(res.data.conversation);
+      setConversationDetails(res.data.conversation);
+    } catch (e: any) {
+      setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível atualizar a foto.");
+    } finally {
+      setConversationAvatarUploading(false);
+    }
+  }
+
+  async function removeConversationAvatar() {
+    const conversation = conversationDetails ?? activeConv;
+    if (!conversation?.id) return;
+    if (conversationDetailsLegacyMode) {
+      setConversationDetailsError("Atualize o servidor para remover a foto desta conversa.");
+      return;
+    }
+
+    setConversationAvatarRemoving(true);
+    setConversationDetailsError(null);
+    try {
+      const res = await api.delete<ConversationDetailsResponse>(`/conversations/${conversation.id}/avatar`);
+      setBrokenAvatarUrls(new Set());
+      applyConversationUpdateLocally(res.data.conversation);
+      setConversationDetails(res.data.conversation);
+    } catch (e: any) {
+      setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível remover a foto.");
+    } finally {
+      setConversationAvatarRemoving(false);
+    }
+  }
+
   function resolveAvatarUrl(rawUrl?: string | null) {
     const absolute = toAbsoluteUrl(rawUrl);
     if (!absolute) return null;
@@ -2055,6 +5117,7 @@ export function ChatPage() {
     const out: GroupedMessageRow[] = [];
     let last = "";
     let unreadInserted = false;
+    let previousMessage: Message | null = null;
 
     for (const msg of items) {
       if (!unreadInserted && unreadMarkerMessageId && msg.id === unreadMarkerMessageId) {
@@ -2066,8 +5129,15 @@ export function ChatPage() {
       if (label !== last) {
         out.push({ kind: "sep", label });
         last = label;
+        previousMessage = null;
       }
-      out.push({ kind: "msg", value: msg });
+
+      out.push({
+        kind: "msg",
+        value: msg,
+        startsSenderBlock: !previousMessage || previousMessage.senderId !== msg.senderId,
+      });
+      previousMessage = msg;
     }
 
     return out;
@@ -2101,10 +5171,51 @@ export function ChatPage() {
     });
   }, [users, userSearch, userCompanyFilter, userDepartmentFilter]);
 
-  const groupedUsers = useMemo(() => {
+  const companyOptions = useMemo(() => {
+    return Array.from(new Set(users.map((u) => u.company?.name).filter(Boolean) as string[])).sort(compareAlpha);
+  }, [users]);
+
+  const departmentOptions = useMemo(() => {
+    return Array.from(new Set(users.map((u) => u.department?.name).filter(Boolean) as string[])).sort(compareAlpha);
+  }, [users]);
+
+  const companyRuleOptions = useMemo(() => {
+    const map = new Map<string, OrgMini>();
+    for (const user of users) {
+      if (user.company?.id && user.company?.name) {
+        map.set(user.company.id, { id: user.company.id, name: user.company.name });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => compareAlpha(a.name, b.name));
+  }, [users]);
+
+  const departmentRuleOptions = useMemo(() => {
+    const map = new Map<string, OrgMini>();
+    for (const user of users) {
+      if (user.department?.id && user.department?.name) {
+        map.set(user.department.id, { id: user.department.id, name: user.department.name });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => compareAlpha(a.name, b.name));
+  }, [users]);
+
+  const pickerSelectedUserSet = useMemo(
+    () => new Set(pickerSelectedUserIds),
+    [pickerSelectedUserIds]
+  );
+  const pickerConversation = useMemo(
+    () => conversations.find((conv) => conv.id === pickerConversationId) ?? null,
+    [conversations, pickerConversationId]
+  );
+  const pickerAvailableUsers = useMemo(() => {
+    if (pickerMode !== "group-members") return usersFiltered;
+    const existingIds = new Set(conversationParticipants(pickerConversation).map((user) => user.id));
+    return usersFiltered.filter((user) => !existingIds.has(user.id));
+  }, [pickerConversation, pickerMode, usersFiltered]);
+  const pickerGroupedUsers = useMemo(() => {
     const companyMap = new Map<string, Map<string, UserMini[]>>();
 
-    for (const user of usersFiltered) {
+    for (const user of pickerAvailableUsers) {
       const company = user.company?.name ?? "Sem empresa";
       const department = user.department?.name ?? "Sem setor";
       const byDept = companyMap.get(company) ?? new Map<string, UserMini[]>();
@@ -2129,19 +5240,81 @@ export function ChatPage() {
           .sort((a, b) => compareAlpha(a.department, b.department)),
       }))
       .sort((a, b) => compareAlpha(a.company, b.company));
-  }, [usersFiltered]);
+  }, [pickerAvailableUsers]);
+  const pickerNeedsSelection = pickerMode === "group" || pickerMode === "broadcast" || pickerMode === "group-members";
+  const pickerNeedsTitle = pickerMode === "group" || pickerMode === "broadcast";
+  const pickerBroadcastHasAudience =
+    pickerIncludeAllUsers ||
+    pickerSelectedCompanyIds.length > 0 ||
+    pickerSelectedDepartmentIds.length > 0 ||
+    pickerSelectedUserIds.length > 0;
+  const pickerPrimaryLabel =
+    pickerMode === "group"
+      ? "Criar grupo"
+      : pickerMode === "broadcast"
+      ? "Criar lista"
+      : pickerMode === "group-members"
+      ? "Adicionar pessoas"
+      : "";
+  const pickerTitleLabel =
+    pickerMode === "group"
+      ? "Nome do grupo"
+      : pickerMode === "broadcast"
+      ? "Nome da lista de transmissão"
+      : "Nome";
 
-  const companyOptions = useMemo(() => {
-    return Array.from(new Set(users.map((u) => u.company?.name).filter(Boolean) as string[])).sort(compareAlpha);
-  }, [users]);
+  const conversationDetailsEffectiveTargets = useMemo(() => {
+    if (!conversationDetails || conversationKind(conversationDetails) !== "BROADCAST") return [];
+    if (!users.length) return conversationDetails.effectiveBroadcastTargets ?? [];
+    return computeBroadcastEffectiveUsers(
+      users,
+      conversationDetails.createdById,
+      conversationDetailsSelectedUserIds,
+      conversationDetailsSelectedCompanyIds,
+      conversationDetailsSelectedDepartmentIds,
+      conversationDetailsExcludedUserIds,
+      conversationDetailsIncludeAllUsers
+    );
+  }, [
+    users,
+    conversationDetails,
+    conversationDetailsSelectedUserIds,
+    conversationDetailsSelectedCompanyIds,
+    conversationDetailsSelectedDepartmentIds,
+    conversationDetailsExcludedUserIds,
+    conversationDetailsIncludeAllUsers,
+  ]);
 
-  const departmentOptions = useMemo(() => {
-    return Array.from(new Set(users.map((u) => u.department?.name).filter(Boolean) as string[])).sort(compareAlpha);
-  }, [users]);
+  const conversationDetailsAvailableTargets = useMemo(() => {
+    if (!conversationDetails || conversationKind(conversationDetails) !== "BROADCAST") return [];
+    const effectiveIds = new Set(conversationDetailsEffectiveTargets.map((user) => user.id));
+    const ownerId = conversationDetails.createdById ?? null;
+    const source = users.length ? users : conversationDetails.availableBroadcastUsers ?? [];
+    return source
+      .filter((user) => user.id !== ownerId && !effectiveIds.has(user.id))
+      .sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
+  }, [users, conversationDetails, conversationDetailsEffectiveTargets]);
 
   const favoriteMessages = useMemo(() => {
     return messages.filter((m) => m.isFavorited);
   }, [messages]);
+  const selectedConversationIdSet = useMemo(() => new Set(selectedConversationIds), [selectedConversationIds]);
+  const selectedConversations = useMemo(
+    () => conversations.filter((conv) => selectedConversationIdSet.has(conv.id)),
+    [conversations, selectedConversationIdSet]
+  );
+  const allConversationsSelected =
+    conversations.length > 0 && selectedConversationIds.length === conversations.length;
+  const pendingConversationCountdownSeconds = Math.max(0, Math.ceil(pendingConversationCountdownMs / 1000));
+  const selectedMessageIdSet = useMemo(() => new Set(selectedMessageIds), [selectedMessageIds]);
+  const selectableMessageIds = useMemo(() => messages.map((m) => m.id), [messages]);
+  const selectedMessages = useMemo(
+    () => messages.filter((m) => selectedMessageIdSet.has(m.id)),
+    [messages, selectedMessageIdSet]
+  );
+  const allMessagesSelected =
+    selectableMessageIds.length > 0 && selectedMessageIds.length === selectableMessageIds.length;
+  const pendingDeleteCountdownSeconds = Math.max(0, Math.ceil(pendingDeleteCountdownMs / 1000));
 
   const currentViewerItem = imageViewerItems[imageViewerIndex] ?? null;
   const currentViewerUrl = toAbsoluteUrl(currentViewerItem?.attachmentUrl);
@@ -2150,6 +5323,8 @@ export function ChatPage() {
   const canViewNext = imageViewerIndex < imageViewerItems.length - 1;
   const showMobileSidebar = !isMobileLayout || !activeConv;
   const showMobileMain = !isMobileLayout || !!activeConv;
+  const canSendInActiveConversation =
+    !!activeConv && !(conversationKind(activeConv) === "GROUP" && activeConv.isCurrentParticipant === false);
 
   useLayoutEffect(() => {
     const container = convListRef.current;
@@ -2229,6 +5404,7 @@ export function ChatPage() {
     s.on("conversation:hidden", (payload: { conversationId: string }) => {
       setConversations((prev) => prev.filter((conv) => conv.id !== payload.conversationId));
       if (payload.conversationId === activeConvIdRef.current) {
+        activeConvIdRef.current = null;
         setActiveConv(null);
         setMessages([]);
         setNewMsgsCount(0);
@@ -2264,17 +5440,38 @@ export function ChatPage() {
 
   useEffect(() => {
     void (async () => {
-      await loadMe();
-      await loadConversations();
+      try {
+        await loadMe();
+        await loadConversations();
+      } catch {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (!pickerOpen) return;
+    if (!token) return;
+
+    function retryConversationLoad() {
+      if (document.hidden) return;
+      if (loadingConvs) return;
+      if (conversationsRef.current.length > 0 && !conversationsError) return;
+      void loadConversations(activeConvIdRef.current ?? undefined).catch(() => {});
+    }
+
+    window.addEventListener("focus", retryConversationLoad);
+    document.addEventListener("visibilitychange", retryConversationLoad);
+    return () => {
+      window.removeEventListener("focus", retryConversationLoad);
+      document.removeEventListener("visibilitychange", retryConversationLoad);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, loadingConvs, conversationsError]);
+
+  useEffect(() => {
+    if (!pickerOpen && !conversationDetailsOpen) return;
     void loadUsers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickerOpen]);
+  }, [pickerOpen, conversationDetailsOpen]);
 
   useEffect(() => {
     if (!imageViewerOpen) return;
@@ -2354,6 +5551,15 @@ export function ChatPage() {
     syncUnreadJumpButton();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, unreadAnchorMessageId, activeConv?.id]);
+
+  useEffect(() => {
+    if (!activeConv?.id || !messages.length || !messagesNextCursor || loadingMsgs || loadingOlderMsgs) return;
+    const el = msgListRef.current;
+    if (!el) return;
+    if (el.scrollHeight > el.clientHeight + MESSAGE_LIST_AUTOLOAD_THRESHOLD) return;
+    void loadOlderMessages(activeConv.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConv?.id, messages.length, messagesNextCursor, loadingMsgs, loadingOlderMsgs]);
 
   useEffect(() => {
     const desktopApi = window.bhashDesktop;
@@ -2451,74 +5657,179 @@ export function ChatPage() {
         <aside className="chat-sidebar">
           <div className="chat-sidebar__header">
             <div className="chat-sidebar__title">Conversas</div>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="chat-sidebar__actions" ref={createMenuRef}>
               <button className="chat-iconBtn" onClick={() => setMyInfoOpen(true)} title="Minhas informações">
                 <GearIcon />
               </button>
-              <button className="chat-primaryIconBtn" onClick={() => setPickerOpen(true)} title="Nova conversa">
-                <PlusIcon />
-                <span>Nova</span>
+              <button
+                className="chat-primaryIconBtn chat-primaryIconBtn--round"
+                onClick={() => setCreateMenuOpen((prev) => !prev)}
+                title="Criar conversa, grupo ou lista"
+                aria-haspopup="menu"
+                aria-expanded={createMenuOpen}
+              >
+                <ComposeConversationIcon />
               </button>
+              {createMenuOpen ? (
+                <div className="chat-createMenu" role="menu">
+                  <button
+                    className="chat-createMenu__item"
+                    onClick={() => openCreatePicker("broadcast")}
+                    role="menuitem"
+                  >
+                    Nova lista
+                  </button>
+                  <button
+                    className="chat-createMenu__item"
+                    onClick={() => openCreatePicker("group")}
+                    role="menuitem"
+                  >
+                    Novo grupo
+                  </button>
+                  <button
+                    className="chat-createMenu__item"
+                    onClick={() => openCreatePicker("direct")}
+                    role="menuitem"
+                  >
+                    Nova conversa
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
+
+          {conversationSelectMode ? (
+            <div className="chat-convSelectBar">
+              <button className="chat-iconBtn chat-iconBtn--sm" onClick={stopConversationSelectMode} title="Fechar seleção">
+                <CloseIcon />
+              </button>
+              <div className="chat-convSelectBar__count">
+                {selectedConversationIds.length}{" "}
+                {selectedConversationIds.length === 1 ? "contato selecionado" : "contatos selecionados"}
+              </div>
+              <button className="chat-convSelectBar__selectAll" onClick={toggleSelectAllConversations}>
+                {allConversationsSelected ? "Desmarcar todos" : "Selecionar todos"}
+              </button>
+              <button
+                className="chat-iconBtn chat-iconBtn--sm is-danger"
+                onClick={requestRemoveSelectedConversations}
+                title="Apagar chats selecionados"
+                disabled={!selectedConversationIds.length}
+              >
+                <TrashIcon />
+              </button>
+            </div>
+          ) : null}
 
           <div className="chat-sidebar__list" ref={convListRef}>
             {loadingConvs ? (
               <div className="chat-empty">Carregando conversas…</div>
+            ) : conversationsError ? (
+              <div className="chat-emptyState">
+                <div className="chat-error">{conversationsError}</div>
+                <button
+                  type="button"
+                  className="chat-emptyState__action"
+                  onClick={() => void loadConversations(activeConvIdRef.current ?? undefined).catch(() => {})}
+                >
+                  Tentar novamente
+                </button>
+              </div>
             ) : conversations.length === 0 ? (
               <div className="chat-empty">Nenhuma conversa ainda.</div>
             ) : (
               conversations.map((conv) => {
-                const other = conv.otherUser;
                 const active = activeConv?.id === conv.id;
-                const avatar = resolveAvatarUrl(other.avatarUrl);
+                const title = conversationDisplayName(conv);
+                const avatar = resolveAvatarUrl(conversationAvatarUrl(conv));
+                const previewText = conversationPreviewText(conv, me?.id ?? null);
+                const conversationTime = fmtTime(
+                  conv.lastMessage?.createdAt ?? conv.updatedAt ?? conv.createdAt
+                );
 
                 return (
-                  <div key={conv.id} className="chat-convCardWrap" data-conv-id={conv.id}>
+                  <div
+                    key={conv.id}
+                    className={`chat-convCardWrap ${conversationSelectMode ? "is-selecting" : ""} ${
+                      selectedConversationIdSet.has(conv.id) ? "is-selected" : ""
+                    }`}
+                    data-conv-id={conv.id}
+                  >
+                    {conversationSelectMode ? (
+                      <button
+                        type="button"
+                        className={`chat-convSelectToggle ${selectedConversationIdSet.has(conv.id) ? "is-selected" : ""}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleConversationSelection(conv.id);
+                        }}
+                        aria-pressed={selectedConversationIdSet.has(conv.id)}
+                        title={selectedConversationIdSet.has(conv.id) ? "Desmarcar chat" : "Selecionar chat"}
+                      >
+                        <span aria-hidden="true">{selectedConversationIdSet.has(conv.id) ? "✓" : ""}</span>
+                      </button>
+                    ) : null}
                     <button
-                      className={`chat-convCard ${active ? "is-active" : ""}`}
-                      onClick={() => void openConversation(conv)}
+                      className={`chat-convCard ${active ? "is-active" : ""} ${
+                        conv.unreadCount ? "has-unread" : ""
+                      } ${conv.pinned ? "has-pin" : ""} ${
+                        conversationSelectMode ? "is-selectable" : ""
+                      } ${selectedConversationIdSet.has(conv.id) ? "is-selected" : ""}`}
+                      onClick={() =>
+                        conversationSelectMode
+                          ? toggleConversationSelection(conv.id)
+                          : void openConversation(conv)
+                      }
                     >
                       <div className="chat-avatar chat-avatar--md">
                         {avatar ? (
-                          <img src={avatar} alt={other.name} onError={() => markAvatarBroken(other.avatarUrl)} />
+                          <img
+                            src={avatar}
+                            alt={title}
+                            onError={() => markAvatarBroken(conversationAvatarUrl(conv))}
+                          />
                         ) : (
-                          <span>{other.name.slice(0, 1).toUpperCase()}</span>
+                          <span>{conversationAvatarFallback(conv)}</span>
                         )}
                       </div>
 
                       <div className="chat-convCard__main">
                         <div className="chat-convCard__nameRow">
-                          <span className="chat-convCard__name">{other.name}</span>
-                          {conv.pinned ? <span className="chat-convPinnedTag">Fixada</span> : null}
+                          <span className="chat-convCard__name">{title}</span>
                         </div>
-                        <div className="chat-convCard__meta">
-                          {conv.lastMessage?.body?.trim() ||
-                            (isMediaAttachment(conv.lastMessage ?? {})
-                              ? mediaLabel(conv.lastMessage ?? {})
-                              : conv.lastMessage?.contentType === "FILE"
-                              ? normalizeAttachmentDisplayName(conv.lastMessage?.attachmentName) || "Arquivo"
-                              : `${other.department?.name ?? "Sem setor"}${other.company?.name ? ` • ${other.company.name}` : ""}`)}
+                        <div className="chat-convCard__meta">{previewText}</div>
+                      </div>
+
+                      <div className="chat-convCard__side" aria-hidden="true">
+                        <span className="chat-convCard__time">{conversationTime}</span>
+                        <div className="chat-convCard__status">
+                          {conv.pinned ? (
+                            <span className="chat-convPinIcon" title="Conversa fixada">
+                              <PinIcon />
+                            </span>
+                          ) : null}
+                          {conv.unreadCount ? <span className="chat-unreadBadge">{conv.unreadCount}</span> : null}
                         </div>
                       </div>
-                      {conv.unreadCount ? <span className="chat-unreadBadge">{conv.unreadCount}</span> : null}
                     </button>
 
-                    <button
-                      className={`chat-convMenuBtn ${conversationMenuId === conv.id ? "is-open" : ""}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActionMenuMsgId(null);
-                        setReactionBarMsgId(null);
-                        setReactionPickerMsgId(null);
-                        setConversationMenuId((prev) => (prev === conv.id ? null : conv.id));
-                      }}
-                      title="Ações da conversa"
-                    >
-                      <DotsIcon />
-                    </button>
+                    {!conversationSelectMode ? (
+                      <button
+                        className={`chat-convMenuBtn ${conversationMenuId === conv.id ? "is-open" : ""}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActionMenuMsgId(null);
+                          setReactionBarMsgId(null);
+                          setReactionPickerMsgId(null);
+                          setConversationMenuId((prev) => (prev === conv.id ? null : conv.id));
+                        }}
+                        title="Ações da conversa"
+                      >
+                        <DotsIcon />
+                      </button>
+                    ) : null}
 
-                    {conversationMenuId === conv.id ? (
+                    {!conversationSelectMode && conversationMenuId === conv.id ? (
                       <div className="chat-convMenu" onClick={(e) => e.stopPropagation()}>
                         <button
                           className="chat-msgMenu__item"
@@ -2527,17 +5838,43 @@ export function ChatPage() {
                           <PinIcon filled={!!conv.pinned} />
                           <span>{conv.pinned ? "Desafixar conversa" : "Fixar conversa"}</span>
                         </button>
-                        <button className="chat-msgMenu__item" onClick={() => void clearConversation(conv.id)}>
+                        {conversationKind(conv) === "GROUP" ? (
+                          <button
+                            className="chat-msgMenu__item"
+                            onClick={() => {
+                              setConversationMenuId(null);
+                              openCreatePicker("group-members", conv);
+                            }}
+                          >
+                            <PlusIcon />
+                            <span>Adicionar pessoas</span>
+                          </button>
+                        ) : null}
+                        <button
+                          className="chat-msgMenu__item"
+                          onClick={() => void clearConversation(conv.id, title)}
+                        >
                           <TrashIcon />
                           <span>Limpar conversa</span>
                         </button>
-                        <button
-                          className="chat-msgMenu__item chat-msgMenu__item--danger"
-                          onClick={() => void removeConversationFromList(conv.id)}
-                        >
-                          <CloseIcon />
-                          <span>Remover dos chats</span>
-                        </button>
+                        {conversationKind(conv) === "GROUP" ? (
+                          <button
+                            className="chat-msgMenu__item chat-msgMenu__item--danger"
+                            onClick={() => void leaveGroup(conv)}
+                          >
+                            <CloseIcon />
+                            <span>Sair do grupo</span>
+                          </button>
+                        ) : null}
+                        {conversationKind(conv) !== "GROUP" || conv.isCurrentParticipant === false ? (
+                          <button
+                            className="chat-msgMenu__item chat-msgMenu__item--danger"
+                            onClick={() => void removeConversationFromList(conv.id)}
+                          >
+                            <CloseIcon />
+                            <span>Remover dos chats</span>
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -2557,6 +5894,7 @@ export function ChatPage() {
                   <button
                     className="chat-iconBtn chat-mainHeader__backBtn"
                     onClick={() => {
+                      activeConvIdRef.current = null;
                       setActiveConv(null);
                       setSearchOpen(false);
                       setProfileOpen(false);
@@ -2572,27 +5910,51 @@ export function ChatPage() {
                   </button>
                 ) : null}
 
-                <button className="chat-contactBtn" onClick={() => void loadProfileDrawer()}>
-                  <div className="chat-avatar chat-avatar--lg">
-                    {(() => {
-                      const other = activeConv.otherUser;
-                      const avatar = resolveAvatarUrl(other.avatarUrl);
-                      return avatar ? (
-                        <img src={avatar} alt={other.name} onError={() => markAvatarBroken(other.avatarUrl)} />
-                      ) : (
-                        <span>{other.name.slice(0, 1).toUpperCase()}</span>
-                      );
-                    })()}
-                  </div>
-
-                  <div className="chat-mainHeader__text">
-                    <div className="chat-mainHeader__name">{activeConv.otherUser.name}</div>
-                    <div className="chat-mainHeader__sub">
-                      {activeConv.otherUser.department?.name ?? "Sem setor"}
-                      {activeConv.otherUser.company?.name ? ` • ${activeConv.otherUser.company.name}` : ""}
+                {conversationKind(activeConv) === "DIRECT" ? (
+                  <button className="chat-contactBtn" onClick={() => void loadProfileDrawer()}>
+                    <div className="chat-avatar chat-avatar--lg">
+                      {(() => {
+                        const avatar = resolveAvatarUrl(conversationAvatarUrl(activeConv));
+                        return avatar ? (
+                          <img
+                            src={avatar}
+                            alt={conversationDisplayName(activeConv)}
+                            onError={() => markAvatarBroken(conversationAvatarUrl(activeConv))}
+                          />
+                        ) : (
+                          <span>{conversationAvatarFallback(activeConv)}</span>
+                        );
+                      })()}
                     </div>
-                  </div>
-                </button>
+
+                    <div className="chat-mainHeader__text">
+                      <div className="chat-mainHeader__name">{conversationDisplayName(activeConv)}</div>
+                      <div className="chat-mainHeader__sub">{conversationSummaryLine(activeConv)}</div>
+                    </div>
+                  </button>
+                ) : (
+                  <button className="chat-contactBtn" onClick={() => void loadConversationDetailsDrawer(activeConv)}>
+                    <div className="chat-avatar chat-avatar--lg">
+                      {(() => {
+                        const avatar = resolveAvatarUrl(conversationAvatarUrl(activeConv));
+                        return avatar ? (
+                          <img
+                            src={avatar}
+                            alt={conversationDisplayName(activeConv)}
+                            onError={() => markAvatarBroken(conversationAvatarUrl(activeConv))}
+                          />
+                        ) : (
+                          <span>{conversationAvatarFallback(activeConv)}</span>
+                        );
+                      })()}
+                    </div>
+
+                    <div className="chat-mainHeader__text">
+                      <div className="chat-mainHeader__name">{conversationDisplayName(activeConv)}</div>
+                      <div className="chat-mainHeader__sub">{conversationSummaryLine(activeConv)}</div>
+                    </div>
+                  </button>
+                )}
               </div>
             ) : (
               <div className="chat-mainHeader__placeholder">Selecione uma conversa</div>
@@ -2637,9 +5999,9 @@ export function ChatPage() {
                   setNewMsgsCount(0);
                 }
                 syncUnreadJumpButton();
-                if (!activeConv?.id || !messagesNextCursor || loadingMsgs) return;
-                if (el.scrollTop < 120) {
-                  void loadMessages(activeConv.id, messagesNextCursor, true);
+                if (!activeConv?.id || !messagesNextCursor || loadingMsgs || loadingOlderMsgs) return;
+                if (el.scrollTop < MESSAGE_LIST_TOP_LOAD_THRESHOLD) {
+                  void loadOlderMessages(activeConv.id);
                 }
               }}
             >
@@ -2651,7 +6013,13 @@ export function ChatPage() {
                 <div className="chat-error">{messagesErr}</div>
               ) : (
                 <>
-                  {messagesNextCursor ? <div className="chat-topHint">Role para cima para carregar mais</div> : null}
+                  {loadingOlderMsgs ? (
+                    <div className="chat-topHint">Carregando mensagens antigas…</div>
+                  ) : messagesNextCursor ? (
+                    <div className="chat-topHint">Role para cima para carregar mais</div>
+                  ) : messages.length ? (
+                    <div className="chat-topHint">Início da conversa</div>
+                  ) : null}
 
                   <div className="chat-messageStack">
                     {grouped.map((row, idx) => {
@@ -2681,10 +6049,39 @@ export function ChatPage() {
                       const msg = row.value;
                       const isMine = me?.id === msg.senderId;
                       const imageUrl = toAbsoluteUrl(msg.attachmentUrl);
+                      const audioPlaybackUrl = isAudioMessageAttachment(msg) ? imageUrl : null;
                       const pdfPreviewUrl = isPdfAttachment(msg) ? buildPdfPreviewUrl(msg.attachmentUrl) : null;
+                      const spreadsheetPreviewUrl = isSpreadsheetAttachment(msg) ? imageUrl : null;
+                      const textDocumentPreviewUrl = isTextDocumentAttachment(msg) ? imageUrl : null;
+                      const presentationPreviewUrl = isPresentationAttachment(msg) ? imageUrl : null;
+                      const imageDocumentPreviewUrl =
+                        msg.contentType === "FILE" && isImageDocumentPreview(msg) ? imageUrl : null;
+                      const videoDocumentPreviewUrl =
+                        msg.contentType === "FILE" && isVideoDocumentPreview(msg) ? imageUrl : null;
+                      const hasAttachmentMediaPreview = !!(isMediaAttachment(msg) && imageUrl);
+                      const hasAudioPlayerPreview = !!audioPlaybackUrl;
+                      const hasFilePreviewOverlay = !!(
+                        !isAudioMessageAttachment(msg) &&
+                        !isMediaAttachment(msg) &&
+                        msg.contentType === "FILE" &&
+                        imageUrl
+                      );
+                      const hasOverlayPreview =
+                        hasAttachmentMediaPreview || hasFilePreviewOverlay || hasAudioPlayerPreview;
                       const isRemovedImageAttachment = msg.contentType === "IMAGE" && !imageUrl && !!msg.deletedAt;
-                      const isRemovedFileAttachment = msg.contentType === "FILE" && !imageUrl && !!msg.deletedAt;
+                      const isRemovedFileAttachment =
+                        (msg.contentType === "FILE" || msg.contentType === "AUDIO") && !imageUrl && !!msg.deletedAt;
+                      const isRemovedAttachmentNotice = isRemovedImageAttachment || isRemovedFileAttachment;
                       const bodyWithoutRemovedNotice = stripAttachmentRemovalNotice(msg.body);
+                      const hasCompactTextMeta = !hasOverlayPreview && !isRemovedAttachmentNotice && !!bodyWithoutRemovedNotice;
+                      const messageTime = fmtTime(msg.createdAt);
+                      const compactMetaSpacer = `${msg.isFavorited ? "★ " : ""}${messageTime}`;
+                      const showSenderName =
+                        conversationKind(activeConv) === "GROUP" && !isMine && row.startsSenderBlock;
+                      const showBroadcastOriginNotice =
+                        conversationKind(activeConv) === "DIRECT" &&
+                        !!msg.broadcastSource &&
+                        msg.senderId === me?.id;
                       const replyPreview = replyPreviewText(msg.replyTo);
                       const reactions = aggregateReactions(msg.reactions, me?.id ?? null);
 
@@ -2696,21 +6093,64 @@ export function ChatPage() {
                             actionMenuMsgId === msg.id ? "is-menu-open" : ""
                           } ${
                             reactions.length ? "has-reactions" : ""
+                          } ${
+                            multiDeleteMode ? "is-selecting" : ""
+                          } ${
+                            selectedMessageIdSet.has(msg.id) ? "is-selected" : ""
                           }`}
                         >
                           {multiDeleteMode ? (
-                            <input
-                              type="checkbox"
-                              checked={selectedMessageIds.includes(msg.id)}
-                              onChange={() =>
-                                setSelectedMessageIds((prev) =>
-                                  prev.includes(msg.id) ? prev.filter((id) => id !== msg.id) : [...prev, msg.id]
-                                )
-                              }
-                            />
+                            <button
+                              type="button"
+                              className={`chat-msgSelectToggle ${selectedMessageIdSet.has(msg.id) ? "is-selected" : ""}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleMessageSelection(msg.id);
+                              }}
+                              aria-pressed={selectedMessageIdSet.has(msg.id)}
+                              title={selectedMessageIdSet.has(msg.id) ? "Desmarcar mensagem" : "Selecionar mensagem"}
+                            >
+                              <span aria-hidden="true">{selectedMessageIdSet.has(msg.id) ? "✓" : ""}</span>
+                            </button>
                           ) : null}
-                          <div className={`chat-bubble ${isMine ? "is-mine" : "is-other"}`}>
-                            {!msg.deletedAt ? (
+                          <div
+                            className={`chat-bubble ${isMine ? "is-mine" : "is-other"} ${
+                              msg.replyTo ? "has-reply" : ""
+                            } ${hasOverlayPreview ? "has-visualPreview" : ""} ${
+                              hasAttachmentMediaPreview ? "has-mediaPreview" : ""
+                            } ${isRemovedAttachmentNotice ? "has-removedNotice" : ""} ${
+                              hasFilePreviewOverlay ? "has-filePreview" : ""
+                            } ${
+                              audioPlaybackUrl ? "has-audioPlayer" : ""
+                            } ${
+                              hasCompactTextMeta ? "has-compactTextMeta" : ""
+                            } ${
+                              multiDeleteMode ? "is-selectable" : ""
+                            } ${
+                              selectedMessageIdSet.has(msg.id) ? "is-selected" : ""
+                            }`}
+                            onClickCapture={
+                              multiDeleteMode
+                                ? (e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    toggleMessageSelection(msg.id);
+                                  }
+                                : undefined
+                            }
+                            onKeyDown={
+                              multiDeleteMode
+                                ? (e) => {
+                                    if (e.key !== "Enter" && e.key !== " ") return;
+                                    e.preventDefault();
+                                    toggleMessageSelection(msg.id);
+                                  }
+                                : undefined
+                            }
+                            role={multiDeleteMode ? "button" : undefined}
+                            tabIndex={multiDeleteMode ? 0 : undefined}
+                          >
+                            {!multiDeleteMode && (!msg.deletedAt || isRemovedAttachmentNotice) ? (
                               <button
                                 className="chat-msgMenuBtn"
                                 data-msg-menu-trigger={msg.id}
@@ -2721,7 +6161,28 @@ export function ChatPage() {
                               </button>
                             ) : null}
 
-                            {actionMenuMsgId === msg.id && !msg.deletedAt ? (
+                            {actionMenuMsgId === msg.id && isRemovedAttachmentNotice ? (
+                              <div
+                                ref={actionMenuRef}
+                                className="chat-msgMenu chat-msgMenu--floating"
+                                style={
+                                  actionMenuPosition
+                                    ? { top: actionMenuPosition.top, left: actionMenuPosition.left }
+                                    : { visibility: "hidden" }
+                                }
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  className="chat-msgMenu__item chat-msgMenu__item--danger"
+                                  onClick={() => {
+                                    void hideRemovedAttachmentNoticesForMe(msg.conversationId);
+                                  }}
+                                >
+                                  <TrashIcon />
+                                  <span>Excluir avisos</span>
+                                </button>
+                              </div>
+                            ) : actionMenuMsgId === msg.id && !msg.deletedAt ? (
                               <div
                                 ref={actionMenuRef}
                                 className="chat-msgMenu chat-msgMenu--floating"
@@ -2856,52 +6317,52 @@ export function ChatPage() {
                                 <button
                                   className="chat-msgMenu__item chat-msgMenu__item--danger"
                                   onClick={() => {
-                                    void hideMessageForMe(msg);
+                                    startMultiDeleteFromMessage(msg);
                                   }}
                                 >
                                   <TrashIcon />
-                                  <span>Apagar do meu chat</span>
+                                  <span>Apagar</span>
                                 </button>
                               </div>
                             ) : null}
 
-                            {!isMine ? <div className="chat-bubble__sender">{msg.sender.name}</div> : null}
+                            {showSenderName ? (
+                              <div className="chat-bubble__sender">{msg.sender?.name ?? "Contato"}</div>
+                            ) : null}
 
-                            {msg.replyTo ? (
-                              <div className="chat-replyBlock">
-                                <div className="chat-replyBlock__name">{msg.replyTo.sender?.name ?? "Mensagem"}</div>
-                                <div className="chat-replyBlock__body">{replyPreview}</div>
+                            {showBroadcastOriginNotice ? (
+                              <div className="chat-broadcastOrigin">
+                                Enviada pela lista de transmissão: <strong>{msg.broadcastSource?.title ?? "Lista"}</strong>
                               </div>
                             ) : null}
 
-                            {isMediaAttachment(msg) && imageUrl ? (
+                            {msg.replyTo ? (
                               <button
                                 type="button"
-                                className="chat-imageLink chat-imageLink--btn"
-                                onClick={() => void openImageViewer(msg)}
-                                title={isVideoAttachment(msg) ? "Abrir mídia" : "Abrir imagem"}
+                                className="chat-replyBlock chat-replyBlock--button"
+                                onClick={() => void jumpToReplyReference(msg.replyTo?.id ?? null)}
+                                title="Ir para a mensagem original"
                               >
-                                {isVideoAttachment(msg) ? (
-                                  <div className="chat-videoPreview">
-                                    <video
-                                      src={imageUrl}
-                                      className="chat-imagePreview"
-                                      preload="metadata"
-                                      muted
-                                      playsInline
-                                    />
-                                    <span className="chat-videoPreview__play" aria-hidden="true">
-                                      <PlayOverlayIcon />
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <img
-                                    src={imageUrl}
-                                    alt={normalizeAttachmentDisplayName(msg.attachmentName) || "imagem"}
-                                    className="chat-imagePreview"
-                                  />
-                                )}
+                                <div className="chat-replyBlock__name">{msg.replyTo.sender?.name ?? "Mensagem"}</div>
+                                <div className="chat-replyBlock__body">{replyPreview}</div>
                               </button>
+                            ) : null}
+
+                            {isMediaAttachment(msg) && imageUrl ? (
+                              <ChatMediaAttachmentButton
+                                message={msg}
+                                attachmentUrl={imageUrl}
+                                onOpen={() => void openImageViewer(msg)}
+                                timeLabel={fmtTime(msg.createdAt)}
+                              />
+                            ) : null}
+
+                            {audioPlaybackUrl ? (
+                              <AudioMessagePlayer
+                                attachmentUrl={msg.attachmentUrl}
+                                attachmentName={msg.attachmentName}
+                                createdAt={msg.createdAt}
+                              />
                             ) : null}
 
                             {isRemovedImageAttachment ? (
@@ -2916,44 +6377,204 @@ export function ChatPage() {
                               </div>
                             ) : null}
 
-                            {!isMediaAttachment(msg) && msg.contentType === "FILE" && imageUrl ? (
-                              <a
-                                href={imageUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className={`chat-fileCard ${pdfPreviewUrl ? "chat-fileCard--pdf" : ""}`}
+                            {!isAudioMessageAttachment(msg) && !isMediaAttachment(msg) && msg.contentType === "FILE" && imageUrl ? (
+                              <div
+                                className={`chat-fileCard ${
+                                  pdfPreviewUrl
+                                    ? "chat-fileCard--pdf"
+                                    : spreadsheetPreviewUrl
+                                    ? "chat-fileCard--sheet"
+                                    : textDocumentPreviewUrl
+                                    ? "chat-fileCard--textDoc"
+                                    : presentationPreviewUrl
+                                    ? "chat-fileCard--presentation"
+                                    : imageDocumentPreviewUrl || videoDocumentPreviewUrl
+                                    ? "chat-fileCard--imagePreview"
+                                    : ""
+                                }`}
                               >
                                 {pdfPreviewUrl ? (
-                                  <div className="chat-fileCard__preview" aria-hidden="true">
-                                    <iframe
-                                      src={pdfPreviewUrl}
-                                      title={normalizeAttachmentDisplayName(msg.attachmentName) || "Pré-visualização do PDF"}
-                                      loading="lazy"
-                                      tabIndex={-1}
-                                    />
-                                  </div>
-                                ) : null}
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div className="chat-fileCard__preview" aria-hidden="true">
+                                      <iframe
+                                        src={pdfPreviewUrl}
+                                        title={normalizeAttachmentDisplayName(msg.attachmentName) || "Pré-visualização do PDF"}
+                                        loading="lazy"
+                                        tabIndex={-1}
+                                      />
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                ) : spreadsheetPreviewUrl ? (
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div className="chat-fileCard__preview chat-fileCard__preview--sheet" aria-hidden="true">
+                                      <SpreadsheetPreview
+                                        attachmentUrl={msg.attachmentUrl}
+                                        attachmentName={msg.attachmentName}
+                                        attachmentMime={msg.attachmentMime}
+                                      />
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                ) : textDocumentPreviewUrl ? (
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div className="chat-fileCard__preview chat-fileCard__preview--textDoc" aria-hidden="true">
+                                      <TextDocumentPreview
+                                        attachmentUrl={msg.attachmentUrl}
+                                        attachmentName={msg.attachmentName}
+                                        attachmentMime={msg.attachmentMime}
+                                      />
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                ) : presentationPreviewUrl ? (
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div
+                                      className="chat-fileCard__preview chat-fileCard__preview--presentation"
+                                      aria-hidden="true"
+                                    >
+                                      <PresentationPreview
+                                        attachmentUrl={msg.attachmentUrl}
+                                        attachmentName={msg.attachmentName}
+                                        attachmentMime={msg.attachmentMime}
+                                      />
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                ) : imageDocumentPreviewUrl ? (
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div className="chat-fileCard__preview chat-fileCard__preview--imageDoc" aria-hidden="true">
+                                      <img
+                                        src={imageDocumentPreviewUrl}
+                                        alt={normalizeAttachmentDisplayName(msg.attachmentName) || "Pré-visualização do documento"}
+                                        className="chat-fileCard__previewMedia chat-fileCard__previewMedia--contain"
+                                        loading="lazy"
+                                        decoding="async"
+                                      />
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                ) : videoDocumentPreviewUrl ? (
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div className="chat-fileCard__preview chat-fileCard__preview--imageDoc" aria-hidden="true">
+                                      <div className="chat-videoPreview">
+                                        <video
+                                          src={videoDocumentPreviewUrl}
+                                          className="chat-fileCard__previewMedia chat-fileCard__previewMedia--contain"
+                                          preload="metadata"
+                                          muted
+                                          playsInline
+                                        />
+                                        <span className="chat-videoPreview__play" aria-hidden="true">
+                                          <PlayOverlayIcon />
+                                        </span>
+                                      </div>
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                ) : (
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__previewLink"
+                                  >
+                                    <div className="chat-fileCard__preview chat-fileCard__preview--fallback" aria-hidden="true">
+                                      <div className="chat-fileCard__previewFallback">
+                                        <div className="chat-fileCard__previewFallbackIcon">
+                                          <AttachmentKindIcon message={msg} />
+                                        </div>
+                                        <span className="chat-fileCard__previewFallbackText">Previa indisponivel</span>
+                                      </div>
+                                      <div className="chat-fileCard__previewMeta">
+                                        <span>{fmtTime(msg.createdAt)}</span>
+                                      </div>
+                                    </div>
+                                  </a>
+                                )}
                                 <div className="chat-fileCard__body">
-                                  <div className="chat-fileCard__icon">
-                                    <FileIcon />
-                                  </div>
-                                  <div className="chat-fileCard__text">
-                                    <div className="chat-fileCard__name">
-                                      {normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo"}
+                                  <a
+                                    href={imageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="chat-fileCard__mainLink"
+                                  >
+                                    <div className="chat-fileCard__icon">
+                                      <AttachmentKindIcon message={msg} />
                                     </div>
-                                    <div className="chat-fileCard__meta">
-                                      {msg.attachmentMime ?? "Arquivo"}
-                                      {msg.attachmentSize ? ` • ${formatBytes(msg.attachmentSize)}` : ""}
+                                    <div className="chat-fileCard__text">
+                                      <div className="chat-fileCard__name">
+                                        {normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo"}
+                                      </div>
+                                      <div className="chat-fileCard__meta">
+                                        {attachmentTypeLabel(msg)}
+                                        {msg.attachmentSize ? ` • ${formatBytes(msg.attachmentSize)}` : ""}
+                                      </div>
                                     </div>
-                                  </div>
+                                  </a>
+                                  <button
+                                    type="button"
+                                    className="chat-fileCard__downloadBtn"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      void downloadAttachment(msg);
+                                    }}
+                                    title="Baixar arquivo"
+                                    aria-label="Baixar arquivo"
+                                  >
+                                    <DownloadIcon />
+                                  </button>
                                 </div>
-                              </a>
+                              </div>
                             ) : null}
 
                             {isRemovedFileAttachment ? (
                               <div className="chat-removedAttachment chat-removedAttachment--file">
                                 <div className="chat-removedAttachment__icon" aria-hidden="true">
-                                  <FileIcon />
+                                  <AttachmentKindIcon message={msg} />
                                 </div>
                                 <div className="chat-removedAttachment__title">Esse documento foi apagado</div>
                                 <div className="chat-removedAttachment__desc">
@@ -2963,7 +6584,10 @@ export function ChatPage() {
                             ) : null}
 
                             {bodyWithoutRemovedNotice ? (
-                              <div className="chat-bubble__body">
+                              <div
+                                className={`chat-bubble__body ${hasCompactTextMeta ? "chat-bubble__body--compact" : ""}`}
+                                data-meta-spacer={hasCompactTextMeta ? compactMetaSpacer : undefined}
+                              >
                                 {highlightTerm.trim() ? (
                                   <HighlightText text={bodyWithoutRemovedNotice} query={highlightTerm} />
                                 ) : (
@@ -2987,10 +6611,12 @@ export function ChatPage() {
                               </div>
                             ) : null}
 
-                            <div className="chat-bubble__meta">
-                              {msg.isFavorited ? <span title="Favorita">★</span> : null}
-                              <span>{fmtTime(msg.createdAt)}</span>
-                            </div>
+                            {!hasOverlayPreview ? (
+                              <div className={`chat-bubble__meta ${hasCompactTextMeta ? "chat-bubble__meta--floating" : ""}`}>
+                                {msg.isFavorited ? <span title="Favorita">★</span> : null}
+                                <span>{messageTime}</span>
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       );
@@ -3071,9 +6697,11 @@ export function ChatPage() {
                           <HighlightText
                             text={
                               hit.body?.trim() ||
-                              (isMediaAttachment(hit)
+                              (isAudioMessageAttachment(hit)
+                                ? "Áudio"
+                                : isMediaAttachment(hit)
                                 ? mediaLabel(hit)
-                                : hit.contentType === "FILE"
+                                : hit.contentType === "FILE" || hit.contentType === "AUDIO"
                                 ? normalizeAttachmentDisplayName(hit.attachmentName) || "Arquivo"
                                 : "")
                             }
@@ -3122,17 +6750,32 @@ export function ChatPage() {
 
             {multiDeleteMode ? (
               <div className="chat-multiDeleteBar">
-                <span>{selectedMessageIds.length} selecionada(s)</span>
-                <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setMultiDeleteMode(false)}>
+                <button className="chat-iconBtn chat-iconBtn--sm" onClick={stopMultiDeleteMode} title="Fechar seleção">
                   <CloseIcon />
                 </button>
-                <button className="chat-primaryBtn" onClick={() => void deleteSelectedMessages()}>
-                  Confirmar exclusão
+                <div className="chat-multiDeleteBar__count">
+                  {selectedMessageIds.length} {selectedMessageIds.length === 1 ? "item selecionado" : "itens selecionados"}
+                </div>
+                <button className="chat-multiDeleteBar__selectAll" onClick={toggleSelectAllMessages}>
+                  {allMessagesSelected ? "Desmarcar todas" : "Selecionar todas"}
+                </button>
+                <button
+                  className="chat-iconBtn chat-iconBtn--sm is-danger"
+                  onClick={requestDeleteSelectedMessages}
+                  title="Apagar mensagens selecionadas"
+                  disabled={!selectedMessageIds.length}
+                >
+                  <TrashIcon />
                 </button>
               </div>
             ) : null}
 
-          <div className="chat-composerWrap">
+          <div className="chat-composerWrap" style={multiDeleteMode ? { display: "none" } : undefined}>
+            {!canSendInActiveConversation && activeConv ? (
+              <div className="chat-composerNotice">
+                Você saiu deste grupo. O histórico continua visível, mas novas mensagens foram bloqueadas para você.
+              </div>
+            ) : null}
             {replyTo ? (
               <div className="chat-replyComposer">
                 <div className="chat-replyComposer__text">
@@ -3146,7 +6789,15 @@ export function ChatPage() {
 
             {attachmentFile ? (
               <div className="chat-attachmentPreview">
-                {attachmentMode === "image" && attachmentPreviewUrl ? (
+                {attachmentMode === "audio" && attachmentPreviewUrl ? (
+                  <div className="chat-attachmentPreview__audio">
+                    <AudioMessagePlayer
+                      attachmentUrl={attachmentPreviewUrl}
+                      attachmentName={attachmentFile.name}
+                      showMeta={false}
+                    />
+                  </div>
+                ) : attachmentMode === "image" && attachmentPreviewUrl ? (
                   isVideoFileLike(attachmentFile) ? (
                     <video
                       src={attachmentPreviewUrl}
@@ -3182,31 +6833,56 @@ export function ChatPage() {
                   className={`chat-iconBtn ${emojiOpen ? "is-active" : ""}`}
                   onClick={(e) => {
                     e.stopPropagation();
+                    setAttachMenuOpen(false);
                     setEmojiOpen((prev) => !prev);
                   }}
                   title="Emojis"
-                  disabled={!activeConv}
+                  disabled={!activeConv || !canSendInActiveConversation}
                 >
                   <SmileIcon />
                 </button>
 
                 <button
-                  className="chat-iconBtn"
-                  onClick={() => imageInputRef.current?.click()}
-                  title="Enviar mídia"
-                  disabled={!activeConv}
+                  className={`chat-iconBtn ${attachMenuOpen ? "is-active" : ""}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEmojiOpen(false);
+                    setAttachMenuOpen((prev) => !prev);
+                  }}
+                  title="Anexos"
+                  disabled={!activeConv || !canSendInActiveConversation}
                 >
-                  <ImageIcon />
+                  <PlusIcon />
                 </button>
 
-                <button
-                  className="chat-iconBtn"
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Enviar arquivo"
-                  disabled={!activeConv}
-                >
-                  <PaperclipIcon />
-                </button>
+                {attachMenuOpen ? (
+                  <div className="chat-attachMenu" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="chat-attachMenu__item"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <FileIcon />
+                      <span>Documento</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-attachMenu__item"
+                      onClick={() => imageInputRef.current?.click()}
+                    >
+                      <ImageIcon />
+                      <span>Fotos e vídeos</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-attachMenu__item"
+                      onClick={() => audioInputRef.current?.click()}
+                    >
+                      <HeadphonesIcon />
+                      <span>Áudio</span>
+                    </button>
+                  </div>
+                ) : null}
 
                 <input
                   ref={imageInputRef}
@@ -3214,6 +6890,14 @@ export function ChatPage() {
                   accept="image/*,video/*"
                   style={{ display: "none" }}
                   onChange={handleMediaPicked}
+                />
+
+                <input
+                  ref={audioInputRef}
+                  type="file"
+                  accept="audio/*"
+                  style={{ display: "none" }}
+                  onChange={handleAudioPicked}
                 />
 
                 <input
@@ -3229,9 +6913,15 @@ export function ChatPage() {
                   ref={composerInputRef}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  placeholder={activeConv ? "Digite sua mensagem..." : "..."}
+                  placeholder={
+                    activeConv
+                      ? canSendInActiveConversation
+                        ? "Digite sua mensagem..."
+                        : "Você saiu deste grupo"
+                      : "..."
+                  }
                   className="chat-input chat-input--composer"
-                  disabled={!activeConv || sending}
+                  disabled={!activeConv || sending || !canSendInActiveConversation}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -3258,7 +6948,7 @@ export function ChatPage() {
               <button
                 className="chat-sendBtn"
                 onClick={() => void sendMessage()}
-                disabled={!activeConv || sending || (!text.trim() && !attachmentFile)}
+                disabled={!activeConv || sending || !canSendInActiveConversation || (!text.trim() && !attachmentFile)}
                 aria-label={sending ? "Enviando mensagem" : "Enviar mensagem"}
                 title={sending ? "Enviando..." : "Enviar"}
               >
@@ -3363,16 +7053,85 @@ export function ChatPage() {
       ) : null}
 
       {pickerOpen ? (
-        <div className="chat-modalBackdrop" onClick={() => setPickerOpen(false)}>
+        <div className="chat-modalBackdrop" onClick={closePicker}>
           <div className="chat-modal chat-modal--wide chat-modal--picker" onClick={(e) => e.stopPropagation()}>
             <div className="chat-modal__header">
-              <div className="chat-modal__title">Nova conversa</div>
-              <button className="chat-iconBtn" onClick={() => setPickerOpen(false)}>
+              <div className="chat-modal__title">
+                {pickerMode === "group"
+                  ? "Novo grupo"
+                  : pickerMode === "broadcast"
+                  ? "Nova lista de transmissão"
+                  : pickerMode === "group-members"
+                  ? `Adicionar pessoas em ${conversationDisplayName(pickerConversation)}`
+                  : "Nova conversa"}
+              </div>
+              <button className="chat-iconBtn" onClick={closePicker}>
                 <CloseIcon />
               </button>
             </div>
 
-            <div className="chat-modal__controls">
+            <div className={`chat-modal__controls ${pickerNeedsTitle ? "chat-modal__controls--stacked" : ""}`}>
+              {pickerNeedsTitle ? (
+                <input
+                  className="chat-input"
+                  value={pickerTitle}
+                  onChange={(e) => setPickerTitle(e.target.value)}
+                  placeholder={pickerTitleLabel}
+                  maxLength={80}
+                />
+              ) : null}
+
+              {pickerMode === "broadcast" ? (
+                <div className="chat-broadcastRules">
+                  <label className="chat-broadcastRules__allToggle">
+                    <input
+                      type="checkbox"
+                      checked={pickerIncludeAllUsers}
+                      onChange={(e) => setPickerIncludeAllUsers(e.target.checked)}
+                    />
+                    <span>Enviar automaticamente para todos os usuários novos e atuais</span>
+                  </label>
+
+                  <div className="chat-broadcastRules__group">
+                    <div className="chat-broadcastRules__label">Empresas automáticas</div>
+                    <div className="chat-broadcastRules__chips">
+                      {companyRuleOptions.map((item) => {
+                        const selected = pickerSelectedCompanyIds.includes(item.id);
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`chat-broadcastChip ${selected ? "is-selected" : ""}`}
+                            onClick={() => togglePickerCompanySelection(item.id)}
+                          >
+                            {item.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="chat-broadcastRules__group">
+                    <div className="chat-broadcastRules__label">Setores automáticos</div>
+                    <div className="chat-broadcastRules__chips">
+                      {departmentRuleOptions.map((item) => {
+                        const selected = pickerSelectedDepartmentIds.includes(item.id);
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`chat-broadcastChip ${selected ? "is-selected" : ""}`}
+                            onClick={() => togglePickerDepartmentSelection(item.id)}
+                          >
+                            {item.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               <input
                 className="chat-input"
                 value={userSearch}
@@ -3410,83 +7169,136 @@ export function ChatPage() {
             <div className="chat-modal__body">
               {loadingUsers ? (
                 <div className="chat-empty">Carregando colaboradores…</div>
-              ) : pickerError ? (
-                <div className="chat-error">{pickerError}</div>
-              ) : groupedUsers.length === 0 ? (
-                <div className="chat-empty">Nenhum colaborador encontrado.</div>
               ) : (
-                groupedUsers.map((group) => (
-                  <div key={group.company} className="chat-userGroup">
-                    <div className="chat-userGroup__companyBar">{group.company}</div>
+                <>
+                  {pickerError ? <div className="chat-error">{pickerError}</div> : null}
+                  {pickerNeedsSelection ? (
+                    <div className="chat-pickerSelectionBar">
+                      {pickerSelectedUserIds.length}{" "}
+                      {pickerSelectedUserIds.length === 1 ? "selecionado" : "selecionados"}
+                      {pickerMode === "broadcast" && (
+                        <span className="chat-pickerSelectionBar__detail">
+                          {pickerIncludeAllUsers ? " • todos os usuários" : ""}
+                          {pickerSelectedCompanyIds.length ? ` • ${pickerSelectedCompanyIds.length} empresa(s)` : ""}
+                          {pickerSelectedDepartmentIds.length ? ` • ${pickerSelectedDepartmentIds.length} setor(es)` : ""}
+                        </span>
+                      )}
+                    </div>
+                  ) : null}
+                  {pickerGroupedUsers.length === 0 ? (
+                    <div className="chat-empty">
+                      {pickerMode === "group-members"
+                        ? "Não há mais colaboradores disponíveis para adicionar."
+                        : "Nenhum colaborador encontrado."}
+                    </div>
+                  ) : (
+                    pickerGroupedUsers.map((group) => (
+                      <div key={group.company} className="chat-userGroup">
+                        <div className="chat-userGroup__companyBar">{group.company}</div>
 
-                    {group.departments.map((dept) => (
-                      <div key={`${group.company}-${dept.department}`} className="chat-userDeptBlock">
-                        <div className="chat-userGroup__departmentBar">{dept.department}</div>
-                        <div className="chat-userGroup__list">
-                          {dept.users.map((user) => (
-                            <div
-                              key={user.id}
-                              className="chat-userRow"
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => void startDirect(user.id)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  void startDirect(user.id);
-                                }
-                              }}
-                            >
-                              <div className="chat-userCell chat-userCell--name">
-                                <div className="chat-avatar chat-avatar--sm">
-                                  {resolveAvatarUrl(user.avatarUrl) ? (
-                                    <img
-                                      src={resolveAvatarUrl(user.avatarUrl) ?? ""}
-                                      alt={user.name}
-                                      onError={() => markAvatarBroken(user.avatarUrl)}
-                                    />
-                                  ) : (
-                                    <span>{user.name.slice(0, 1).toUpperCase()}</span>
-                                  )}
-                                </div>
-                                <div className="chat-userRow__identity">
-                                  <span className="chat-userRow__name">{user.name}</span>
-                                </div>
-                              </div>
-
-                              <div className="chat-userCell chat-userCell--email">
-                                <span className="chat-userFieldLabel">E-mail:</span>
-                                <div className="chat-userEmailWrap">
-                                  <span className="chat-userEmailText">{user.email || "Sem e-mail"}</span>
-                                  <button
-                                    className="chat-iconBtn chat-iconBtn--sm"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (user.email) {
-                                        void copyText(user.email, "E-mail copiado");
+                        {group.departments.map((dept) => (
+                          <div key={`${group.company}-${dept.department}`} className="chat-userDeptBlock">
+                            <div className="chat-userGroup__departmentBar">{dept.department}</div>
+                            <div className="chat-userGroup__list">
+                              {dept.users.map((user) => {
+                                const selected = pickerSelectedUserSet.has(user.id);
+                                return (
+                                  <div
+                                    key={user.id}
+                                    className={`chat-userRow ${selected ? "is-selected" : ""}`}
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => {
+                                      if (pickerMode === "direct") {
+                                        void startDirect(user.id);
+                                        return;
+                                      }
+                                      togglePickerUserSelection(user.id);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        if (pickerMode === "direct") {
+                                          void startDirect(user.id);
+                                          return;
+                                        }
+                                        togglePickerUserSelection(user.id);
                                       }
                                     }}
-                                    title={user.email ? "Copiar e-mail" : "Sem e-mail para copiar"}
-                                    disabled={!user.email}
                                   >
-                                    <CopyIcon />
-                                  </button>
-                                </div>
-                              </div>
+                                    <div className="chat-userCell chat-userCell--name">
+                                      <div className="chat-avatar chat-avatar--sm">
+                                        {resolveAvatarUrl(user.avatarUrl) ? (
+                                          <img
+                                            src={resolveAvatarUrl(user.avatarUrl) ?? ""}
+                                            alt={user.name}
+                                            onError={() => markAvatarBroken(user.avatarUrl)}
+                                          />
+                                        ) : (
+                                          <span>{user.name.slice(0, 1).toUpperCase()}</span>
+                                        )}
+                                      </div>
+                                      <div className="chat-userRow__identity">
+                                        <span className="chat-userRow__name">{user.name}</span>
+                                      </div>
+                                    </div>
 
-                              <div className="chat-userCell chat-userCell--ext">
-                                <span className="chat-userFieldLabel">Ramal:</span>
-                                <span className="chat-userExtText">{user.extension || "Sem ramal"}</span>
-                              </div>
+                                    <div className="chat-userCell chat-userCell--email">
+                                      <span className="chat-userFieldLabel">E-mail:</span>
+                                      <div className="chat-userEmailWrap">
+                                        <span className="chat-userEmailText">{user.email || "Sem e-mail"}</span>
+                                        <button
+                                          className="chat-iconBtn chat-iconBtn--sm"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (user.email) {
+                                              void copyText(user.email, "E-mail copiado");
+                                            }
+                                          }}
+                                          title={user.email ? "Copiar e-mail" : "Sem e-mail para copiar"}
+                                          disabled={!user.email}
+                                        >
+                                          <CopyIcon />
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    <div className="chat-userCell chat-userCell--ext">
+                                      <span className="chat-userFieldLabel">Ramal:</span>
+                                      <span className="chat-userExtText">{user.extension || "Sem ramal"}</span>
+                                      {pickerNeedsSelection ? (
+                                        <span className={`chat-userPickBadge ${selected ? "is-selected" : ""}`}>
+                                          {selected ? "Selecionado" : "Selecionar"}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                );
+                              })}
                             </div>
-                          ))}
-                        </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                ))
+                    ))
+                  )}
+                </>
               )}
             </div>
+
+            {pickerNeedsSelection ? (
+              <div className="chat-modal__footer chat-pickerFooter">
+                <button className="chat-confirmModal__btn" onClick={closePicker} disabled={pickerSubmitting}>
+                  Cancelar
+                </button>
+                <button
+                  className="chat-primaryBtn"
+                  onClick={() => void submitPicker()}
+                  disabled={pickerSubmitting || (pickerMode === "broadcast" ? !pickerBroadcastHasAudience : !pickerSelectedUserIds.length)}
+                >
+                  {pickerSubmitting ? "Salvando..." : pickerPrimaryLabel}
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -3530,8 +7342,11 @@ export function ChatPage() {
               {currentViewerItem ? (
                 <button
                   className="chat-iconBtn is-danger"
-                  onClick={() => void hideMessageForMe(currentViewerItem)}
-                  title="Apagar apenas do seu chat"
+                  onClick={() => {
+                    startMultiDeleteFromMessage(currentViewerItem);
+                    closeImageViewer();
+                  }}
+                  title="Apagar"
                 >
                   <TrashIcon />
                 </button>
@@ -3740,9 +7555,12 @@ export function ChatPage() {
                         </div>
                         <div className="chat-favoriteCard__body">
                           {msg.body?.trim() ||
+                            (isAudioMessageAttachment(msg)
+                              ? "Áudio"
+                              : null) ||
                             (isMediaAttachment(msg)
                               ? mediaLabel(msg)
-                              : msg.contentType === "FILE"
+                              : msg.contentType === "FILE" || msg.contentType === "AUDIO"
                               ? normalizeAttachmentDisplayName(msg.attachmentName) || "Arquivo"
                               : "Mensagem")}
                         </div>
@@ -3800,43 +7618,139 @@ export function ChatPage() {
                           <img
                             src={toAbsoluteUrl(item.attachmentUrl) ?? ""}
                             alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"}
+                            loading="lazy"
+                            decoding="async"
                           />
                         )}
                       </button>
                     ))
                   ) : (
-                    profileMediaItems.map((item) => (
-                      <button
-                        key={item.id}
-                        className={`chat-fileCard chat-fileCard--btn ${isPdfAttachment(item) ? "chat-fileCard--pdf" : ""}`}
-                        onClick={() => {
-                          void jumpToMessageById(item.id);
-                          setProfileOpen(false);
-                        }}
-                      >
-                        {isPdfAttachment(item) ? (
-                          <div className="chat-fileCard__preview" aria-hidden="true">
-                            <iframe
-                              src={buildPdfPreviewUrl(item.attachmentUrl) ?? ""}
-                              title={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do PDF"}
-                              loading="lazy"
-                              tabIndex={-1}
-                            />
-                          </div>
-                        ) : null}
-                        <div className="chat-fileCard__body">
-                          <div className="chat-fileCard__icon">
-                            <FileIcon />
-                          </div>
-                          <div className="chat-fileCard__text">
-                            <div className="chat-fileCard__name">
-                              {normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
+                    profileMediaItems.map((item) => {
+                      const pdfPreviewUrl = isPdfAttachment(item) ? buildPdfPreviewUrl(item.attachmentUrl) : null;
+                      const attachmentUrl = toAbsoluteUrl(item.attachmentUrl);
+                      const spreadsheetPreviewUrl = isSpreadsheetAttachment(item)
+                        ? attachmentUrl
+                        : null;
+                      const textDocumentPreviewUrl = isTextDocumentAttachment(item)
+                        ? attachmentUrl
+                        : null;
+                      const presentationPreviewUrl = isPresentationAttachment(item)
+                        ? attachmentUrl
+                        : null;
+                      const imageDocumentPreviewUrl =
+                        item.contentType === "FILE" && isImageDocumentPreview(item) ? attachmentUrl : null;
+                      const videoDocumentPreviewUrl =
+                        item.contentType === "FILE" && isVideoDocumentPreview(item) ? attachmentUrl : null;
+
+                      return (
+                        <button
+                          key={item.id}
+                          className={`chat-fileCard chat-fileCard--btn ${
+                            pdfPreviewUrl
+                              ? "chat-fileCard--pdf"
+                              : spreadsheetPreviewUrl
+                              ? "chat-fileCard--sheet"
+                              : textDocumentPreviewUrl
+                              ? "chat-fileCard--textDoc"
+                              : presentationPreviewUrl
+                              ? "chat-fileCard--presentation"
+                              : imageDocumentPreviewUrl || videoDocumentPreviewUrl
+                              ? "chat-fileCard--imagePreview"
+                              : ""
+                          }`}
+                          onClick={() => {
+                            void jumpToMessageById(item.id);
+                            setProfileOpen(false);
+                          }}
+                        >
+                          {pdfPreviewUrl ? (
+                            <div className="chat-fileCard__preview" aria-hidden="true">
+                              <iframe
+                                src={pdfPreviewUrl}
+                                title={normalizeAttachmentDisplayName(item.attachmentName) || "Pré-visualização do PDF"}
+                                loading="lazy"
+                                tabIndex={-1}
+                              />
                             </div>
-                            <div className="chat-fileCard__meta">{fmtDateTime(item.createdAt)}</div>
+                          ) : spreadsheetPreviewUrl ? (
+                            <div className="chat-fileCard__preview chat-fileCard__preview--sheet" aria-hidden="true">
+                              <SpreadsheetPreview
+                                attachmentUrl={item.attachmentUrl}
+                                attachmentName={item.attachmentName}
+                                attachmentMime={item.attachmentMime}
+                              />
+                            </div>
+                          ) : textDocumentPreviewUrl ? (
+                            <div className="chat-fileCard__preview chat-fileCard__preview--textDoc" aria-hidden="true">
+                              <TextDocumentPreview
+                                attachmentUrl={item.attachmentUrl}
+                                attachmentName={item.attachmentName}
+                                attachmentMime={item.attachmentMime}
+                              />
+                            </div>
+                          ) : presentationPreviewUrl ? (
+                            <div
+                              className="chat-fileCard__preview chat-fileCard__preview--presentation"
+                              aria-hidden="true"
+                            >
+                              <PresentationPreview
+                                attachmentUrl={item.attachmentUrl}
+                                attachmentName={item.attachmentName}
+                                attachmentMime={item.attachmentMime}
+                              />
+                            </div>
+                          ) : imageDocumentPreviewUrl ? (
+                            <div className="chat-fileCard__preview chat-fileCard__preview--imageDoc" aria-hidden="true">
+                              <img
+                                src={imageDocumentPreviewUrl}
+                                alt={normalizeAttachmentDisplayName(item.attachmentName) || "Previa do documento"}
+                                className="chat-fileCard__previewMedia chat-fileCard__previewMedia--contain"
+                                loading="lazy"
+                                decoding="async"
+                              />
+                            </div>
+                          ) : videoDocumentPreviewUrl ? (
+                            <div className="chat-fileCard__preview chat-fileCard__preview--imageDoc" aria-hidden="true">
+                              <div className="chat-videoPreview">
+                                <video
+                                  src={videoDocumentPreviewUrl}
+                                  className="chat-fileCard__previewMedia chat-fileCard__previewMedia--contain"
+                                  preload="metadata"
+                                  muted
+                                  playsInline
+                                />
+                                <span className="chat-videoPreview__play" aria-hidden="true">
+                                  <PlayOverlayIcon />
+                                </span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="chat-fileCard__preview chat-fileCard__preview--fallback" aria-hidden="true">
+                              <div className="chat-fileCard__previewFallback">
+                                <div className="chat-fileCard__previewFallbackIcon">
+                                  <AttachmentKindIcon message={item} />
+                                </div>
+                                <span className="chat-fileCard__previewFallbackText">Previa indisponivel</span>
+                              </div>
+                            </div>
+                          )}
+                          <div className="chat-fileCard__body">
+                            <div className="chat-fileCard__icon">
+                              <AttachmentKindIcon message={item} />
+                            </div>
+                            <div className="chat-fileCard__text">
+                              <div className="chat-fileCard__name">
+                                {normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
+                              </div>
+                              <div className="chat-fileCard__meta">
+                                {attachmentTypeLabel(item)}
+                                {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </button>
-                    ))
+                        </button>
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -3845,6 +7759,497 @@ export function ChatPage() {
                 <div className="chat-empty">Não foi possível carregar os dados.</div>
               </div>
             )}
+          </div>
+        </div>
+      ) : null}
+
+      {conversationDetailsOpen ? (
+        <div className="chat-modalBackdrop" onClick={() => setConversationDetailsOpen(false)}>
+          <div className="chat-profileDrawer" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-profileDrawer__header">
+              <div className="chat-profileDrawer__title">
+                {conversationKind(conversationDetails ?? activeConv) === "BROADCAST" ? "Dados da lista" : "Dados do grupo"}
+              </div>
+              <button className="chat-iconBtn" onClick={() => setConversationDetailsOpen(false)}>
+                <CloseIcon />
+              </button>
+            </div>
+
+            {conversationDetailsLoading ? (
+              <div className="chat-profileDrawer__body">
+                <div className="chat-empty">Carregando dados da conversa…</div>
+              </div>
+            ) : conversationDetails ? (
+              <div className="chat-profileDrawer__body">
+                <div className="chat-contactCard">
+                  <div className="chat-avatar chat-avatar--xl">
+                    {resolveAvatarUrl(conversationAvatarUrl(conversationDetails)) ? (
+                      <img
+                        src={resolveAvatarUrl(conversationAvatarUrl(conversationDetails)) ?? ""}
+                        alt={conversationDisplayName(conversationDetails)}
+                        onError={() => markAvatarBroken(conversationAvatarUrl(conversationDetails))}
+                      />
+                    ) : (
+                      <span>{conversationAvatarFallback(conversationDetails)}</span>
+                    )}
+                  </div>
+
+                  {conversationKind(conversationDetails) === "BROADCAST" && !conversationDetailsLegacyMode ? (
+                    <input
+                      className="chat-input chat-input--detailsTitle"
+                      value={conversationDetailsTitle}
+                      onChange={(e) => setConversationDetailsTitle(e.target.value)}
+                      maxLength={80}
+                    />
+                  ) : (
+                    <div className="chat-contactCard__name">{conversationDisplayName(conversationDetails)}</div>
+                  )}
+
+                  <div className="chat-contactCard__sub">{conversationSummaryLine(conversationDetails)}</div>
+                </div>
+
+                {conversationDetailsError ? <div className="chat-error">{conversationDetailsError}</div> : null}
+                {conversationDetailsLegacyMode ? (
+                  <div className="chat-note">
+                    Os dados basicos desta conversa foram carregados em modo de compatibilidade. As opcoes de edicao
+                    voltam a aparecer depois que o servidor subir com a versao nova.
+                  </div>
+                ) : null}
+
+                {!conversationDetailsLegacyMode ? (
+                  <div className="chat-detailsActions">
+                    <button
+                      className="chat-primaryBtn"
+                      onClick={() => conversationAvatarInputRef.current?.click()}
+                      disabled={conversationAvatarUploading || conversationAvatarRemoving}
+                    >
+                      {conversationAvatarUploading ? "Enviando..." : "Alterar foto"}
+                    </button>
+                    <button
+                      className="chat-dangerBtn"
+                      onClick={() => void removeConversationAvatar()}
+                      disabled={
+                        conversationAvatarUploading ||
+                        conversationAvatarRemoving ||
+                        !conversationAvatarUrl(conversationDetails)
+                      }
+                    >
+                      {conversationAvatarRemoving ? "Removendo..." : "Remover foto"}
+                    </button>
+                    <input
+                      ref={conversationAvatarInputRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void uploadConversationAvatar(file);
+                        e.currentTarget.value = "";
+                      }}
+                    />
+                  </div>
+                ) : null}
+
+                {conversationKind(conversationDetails) === "GROUP" ? (
+                  <>
+                    <div className="chat-sectionTitle">Participantes</div>
+                    <div className="chat-detailsList">
+                      {conversationParticipants(conversationDetails).map((user) => (
+                        <div key={user.id} className="chat-detailsList__row">
+                          <div className="chat-detailsList__main">
+                            <strong>{user.name}</strong>
+                            <span>{user.email || user.username}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="chat-detailsActions">
+                      {conversationDetails.isCurrentParticipant !== false ? (
+                        <>
+                          <button
+                            className="chat-primaryBtn"
+                            onClick={() => openCreatePicker("group-members", conversationDetails)}
+                          >
+                            Adicionar pessoas
+                          </button>
+                          <button
+                            className="chat-dangerBtn"
+                            onClick={() => void leaveGroup(conversationDetails)}
+                          >
+                            Sair do grupo
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="chat-dangerBtn"
+                          onClick={() => void removeConversationFromList(conversationDetails.id)}
+                        >
+                          Remover dos chats
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {!conversationDetailsLegacyMode ? (
+                      <>
+                        <div className="chat-sectionTitle">Regras automáticas da lista</div>
+                        <div className="chat-broadcastRules chat-broadcastRules--drawer">
+                          <label className="chat-broadcastRules__allToggle">
+                            <input
+                              type="checkbox"
+                              checked={conversationDetailsIncludeAllUsers}
+                              onChange={(e) => setConversationDetailsIncludeAllUsers(e.target.checked)}
+                            />
+                            <span>Incluir automaticamente todos os usuários novos e atuais</span>
+                          </label>
+
+                          <div className="chat-broadcastRules__group">
+                            <div className="chat-broadcastRules__label">Empresas automáticas</div>
+                            <div className="chat-broadcastRules__chips">
+                              {companyRuleOptions.map((item) => (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  className={`chat-broadcastChip ${
+                                    conversationDetailsSelectedCompanyIds.includes(item.id) ? "is-selected" : ""
+                                  }`}
+                                  onClick={() => toggleConversationDetailsCompanySelection(item.id)}
+                                >
+                                  {item.name}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="chat-broadcastRules__group">
+                            <div className="chat-broadcastRules__label">Setores automáticos</div>
+                            <div className="chat-broadcastRules__chips">
+                              {departmentRuleOptions.map((item) => (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  className={`chat-broadcastChip ${
+                                    conversationDetailsSelectedDepartmentIds.includes(item.id) ? "is-selected" : ""
+                                  }`}
+                                  onClick={() => toggleConversationDetailsDepartmentSelection(item.id)}
+                                >
+                                  {item.name}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    ) : null}
+
+                    <div className="chat-sectionTitle">Quem recebe</div>
+                    <div className="chat-detailsList">
+                      {conversationDetailsEffectiveTargets.map((user) => (
+                        <div key={user.id} className="chat-detailsList__row">
+                          <div className="chat-detailsList__main">
+                            <strong>{user.name}</strong>
+                            <span>{user.email || user.username}</span>
+                          </div>
+                          {!conversationDetailsLegacyMode ? (
+                            <button
+                              className="chat-iconBtn chat-iconBtn--sm is-danger"
+                              onClick={() => removeUserFromConversationDetails(user.id)}
+                              title="Remover da lista"
+                            >
+                              <CloseIcon />
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                      {!conversationDetailsEffectiveTargets.length ? (
+                        <div className="chat-empty">Ninguém está recebendo essa lista agora.</div>
+                      ) : null}
+                    </div>
+
+                    {!conversationDetailsLegacyMode ? (
+                      <>
+                        <div className="chat-sectionTitle">Quem está fora da lista</div>
+                        <div className="chat-detailsList">
+                          {conversationDetailsAvailableTargets.map((user) => (
+                            <div key={user.id} className="chat-detailsList__row">
+                              <div className="chat-detailsList__main">
+                                <strong>{user.name}</strong>
+                                <span>{user.email || user.username}</span>
+                              </div>
+                              <button
+                                className="chat-iconBtn chat-iconBtn--sm"
+                                onClick={() => addUserToConversationDetails(user.id)}
+                                title="Adicionar à lista"
+                              >
+                                <PlusIcon />
+                              </button>
+                            </div>
+                          ))}
+                          {!conversationDetailsAvailableTargets.length ? (
+                            <div className="chat-empty">Todos os usuários já estão cobertos por essa lista.</div>
+                          ) : null}
+                        </div>
+
+                        <div className="chat-detailsActions">
+                          <button
+                            className="chat-primaryBtn"
+                            onClick={() => void saveBroadcastConversationDetails()}
+                            disabled={conversationDetailsSaving}
+                          >
+                            {conversationDetailsSaving ? "Salvando..." : "Salvar lista"}
+                          </button>
+                        </div>
+                      </>
+                    ) : null}
+                  </>
+                )}
+
+                <div className="chat-sectionTitle">Mídia e documentos</div>
+
+                <div className="chat-modeToggle chat-modeToggle--block">
+                  <button
+                    className={`chat-modeToggle__btn ${profileMediaTab === "image" ? "is-active" : ""}`}
+                    onClick={() => setProfileMediaTab("image")}
+                  >
+                    Mídia
+                  </button>
+                  <button
+                    className={`chat-modeToggle__btn ${profileMediaTab === "file" ? "is-active" : ""}`}
+                    onClick={() => setProfileMediaTab("file")}
+                  >
+                    Documentos
+                  </button>
+                </div>
+
+                <div className={`chat-mediaGrid ${profileMediaTab === "image" ? "chat-mediaGrid--images" : ""}`}>
+                  {profileMediaLoading ? (
+                    <div className="chat-empty">Carregando…</div>
+                  ) : profileMediaItems.length === 0 ? (
+                    <div className="chat-empty">Nada encontrado.</div>
+                  ) : (
+                    profileMediaItems.map((item) => (
+                      <button
+                        key={item.id}
+                        className={profileMediaTab === "image" ? "chat-mediaThumb chat-mediaThumb--btn" : "chat-fileCard chat-fileCard--btn"}
+                        onClick={() => {
+                          void jumpToMessageById(item.id);
+                          setConversationDetailsOpen(false);
+                        }}
+                      >
+                        {profileMediaTab === "image" ? (
+                          isVideoAttachment(item) ? (
+                            <div className="chat-videoPreview">
+                              <video
+                                src={toAbsoluteUrl(item.attachmentUrl) ?? ""}
+                                className="chat-mediaThumb__video"
+                                preload="metadata"
+                                muted
+                                playsInline
+                              />
+                              <span className="chat-videoPreview__play" aria-hidden="true">
+                                <PlayOverlayIcon />
+                              </span>
+                            </div>
+                          ) : (
+                            <img
+                              src={toAbsoluteUrl(item.attachmentUrl) ?? ""}
+                              alt={normalizeAttachmentDisplayName(item.attachmentName) || "imagem"}
+                              loading="lazy"
+                              decoding="async"
+                            />
+                          )
+                        ) : (
+                          <div className="chat-fileCard__body">
+                            <div className="chat-fileCard__icon">
+                              <AttachmentKindIcon message={item} />
+                            </div>
+                            <div className="chat-fileCard__text">
+                              <div className="chat-fileCard__name">
+                                {normalizeAttachmentDisplayName(item.attachmentName) || "Arquivo"}
+                              </div>
+                              <div className="chat-fileCard__meta">
+                                {attachmentTypeLabel(item)}
+                                {item.attachmentSize ? ` • ${formatBytes(item.attachmentSize)}` : ""}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="chat-profileDrawer__body">
+                <div className="chat-empty">Não foi possível carregar os dados da conversa.</div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {favoriteDeletePrompt ? (
+        <div className="chat-modalBackdrop" onClick={() => setFavoriteDeletePrompt(null)}>
+          <div className="chat-modal chat-confirmModal" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-modal__header">
+              <div className="chat-modal__title">Mensagens favoritas</div>
+              <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setFavoriteDeletePrompt(null)}>
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="chat-modal__body chat-confirmModal__body">
+              {favoriteDeletePrompt.favoriteCount === 1
+                ? "Há 1 mensagem favorita na seleção."
+                : `Há ${favoriteDeletePrompt.favoriteCount} mensagens favoritas na seleção.`}
+              <br />
+              Você quer apagar todas mesmo ou manter as favoritas?
+            </div>
+            <div className="chat-confirmModal__actions">
+              <button className="chat-confirmModal__btn" onClick={() => setFavoriteDeletePrompt(null)}>
+                Cancelar
+              </button>
+              <button className="chat-confirmModal__btn" onClick={() => confirmDeleteSelectedMessages(false)}>
+                Manter favoritas
+              </button>
+              <button className="chat-primaryBtn" onClick={() => confirmDeleteSelectedMessages(true)}>
+                Apagar todas
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {removeChatsPrompt ? (
+        <div className="chat-modalBackdrop" onClick={() => setRemoveChatsPrompt(null)}>
+          <div className="chat-modal chat-confirmModal" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-modal__header">
+              <div className="chat-modal__title">Apagar chats</div>
+              <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setRemoveChatsPrompt(null)}>
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="chat-modal__body chat-confirmModal__body">
+              {removeChatsPrompt.totalCount === 1
+                ? "Deseja apagar o chat selecionado?"
+                : `Deseja apagar os ${removeChatsPrompt.totalCount} chats selecionados?`}
+            </div>
+            <div className="chat-confirmModal__actions">
+              <button className="chat-confirmModal__btn" onClick={() => setRemoveChatsPrompt(null)}>
+                Cancelar
+              </button>
+              <button className="chat-primaryBtn" onClick={confirmRemoveSelectedConversations}>
+                Apagar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {conversationClearPrompt ? (
+        <div className="chat-modalBackdrop" onClick={() => setConversationClearPrompt(null)}>
+          <div className="chat-modal chat-confirmModal" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-modal__header">
+              <div className="chat-modal__title">Limpar conversa</div>
+              <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setConversationClearPrompt(null)}>
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="chat-modal__body chat-confirmModal__body">
+              {conversationClearPrompt.favoriteCount > 0 ? (
+                <>
+                  {conversationClearPrompt.favoriteCount === 1
+                    ? "Há 1 mensagem favorita nesta conversa."
+                    : `Há ${conversationClearPrompt.favoriteCount} mensagens favoritas nesta conversa.`}
+                  <br />
+                  Você quer limpar tudo mesmo ou manter as favoritas?
+                </>
+              ) : (
+                <>
+                  {conversationClearPrompt.totalCount === 1
+                    ? "Deseja limpar a única mensagem visível desta conversa?"
+                    : `Deseja limpar as ${conversationClearPrompt.totalCount} mensagens visíveis desta conversa?`}
+                </>
+              )}
+            </div>
+            <div className="chat-confirmModal__actions">
+              <button className="chat-confirmModal__btn" onClick={() => setConversationClearPrompt(null)}>
+                Cancelar
+              </button>
+              {conversationClearPrompt.favoriteCount > 0 ? (
+                <button className="chat-confirmModal__btn" onClick={() => confirmClearConversation(true)}>
+                  Manter favoritas
+                </button>
+              ) : null}
+              <button className="chat-primaryBtn" onClick={() => confirmClearConversation(false)}>
+                Limpar conversa
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingDeleteBatch ? (
+        <div className="chat-deleteUndoToast" role="status" aria-live="polite">
+          <div className="chat-deleteUndoToast__bar">
+            <div
+              className="chat-deleteUndoToast__barFill"
+              style={{ width: `${Math.max(0, Math.min(100, (pendingDeleteCountdownMs / 5000) * 100))}%` }}
+            />
+          </div>
+          <div className="chat-deleteUndoToast__content">
+            <div className="chat-deleteUndoToast__text">
+              {pendingDeleteBatch.ids.length}{" "}
+              {pendingDeleteBatch.ids.length === 1 ? "mensagem apagada para você." : "mensagens apagadas para você."}
+            </div>
+            <button className="chat-deleteUndoToast__undo" onClick={undoPendingDeleteBatch}>
+              Desfazer{pendingDeleteCountdownSeconds ? ` (${pendingDeleteCountdownSeconds})` : ""}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingConversationHideBatch || pendingConversationClearBatch ? (
+        <div className="chat-deleteUndoToast" role="status" aria-live="polite">
+          <div className="chat-deleteUndoToast__bar">
+            <div
+              className="chat-deleteUndoToast__barFill"
+              style={{ width: `${Math.max(0, Math.min(100, (pendingConversationCountdownMs / 5000) * 100))}%` }}
+            />
+          </div>
+          <div className="chat-deleteUndoToast__content">
+            <div className="chat-deleteUndoToast__text">
+              {pendingConversationHideBatch
+                ? `${pendingConversationHideBatch.ids.length} ${
+                    pendingConversationHideBatch.ids.length === 1 ? "chat apagado para você." : "chats apagados para você."
+                  }`
+                : pendingConversationClearBatch?.keepFavorites
+                ? "Conversa limpa para você, favoritas mantidas."
+                : "Conversa limpa para você."}
+            </div>
+            <button
+              className="chat-deleteUndoToast__undo"
+              onClick={pendingConversationHideBatch ? undoPendingConversationHide : undoPendingConversationClear}
+            >
+              Desfazer{pendingConversationCountdownSeconds ? ` (${pendingConversationCountdownSeconds})` : ""}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {removalNoticesLoading ? (
+        <div className="chat-taskOverlay" aria-live="polite" aria-busy="true">
+          <div className="chat-taskOverlay__card">
+            <div className="chat-taskOverlay__title">Excluindo...</div>
+            <div className="chat-taskOverlay__subtitle">Removendo os avisos deste chat</div>
+            <div className="chat-taskOverlay__progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={removalNoticesProgress}>
+              <div
+                className="chat-taskOverlay__progressFill"
+                style={{ width: `${removalNoticesProgress}%` }}
+              />
+            </div>
+            <div className="chat-taskOverlay__percent">{removalNoticesProgress}%</div>
           </div>
         </div>
       ) : null}

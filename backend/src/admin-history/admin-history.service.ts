@@ -64,19 +64,99 @@ export class AdminHistoryService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  private attachmentStorageKind(attachmentUrl?: string | null) {
+    const url = String(attachmentUrl ?? '').toLowerCase();
+    if (url.includes('/chat-files/')) return 'file';
+    if (url.includes('/chat-media/')) return 'media';
+    if (url.includes('/chat-audio/')) return 'audio';
+    return null;
+  }
+
   private normalizeAttachmentName(value?: string | null) {
     const normalized = normalizeUploadedFileName(value);
     return normalized || null;
   }
 
   private isMediaAttachment(message: {
-    contentType?: MessageContentType | 'IMAGE' | 'FILE' | string | null;
+    contentType?: MessageContentType | 'IMAGE' | 'FILE' | 'AUDIO' | string | null;
     attachmentMime?: string | null;
     attachmentName?: string | null;
     attachmentUrl?: string | null;
   }) {
+    const storageKind = this.attachmentStorageKind(message.attachmentUrl);
+    if (storageKind === 'file') return false;
+    if (storageKind === 'media') return true;
+    if (storageKind === 'audio') return false;
     if (message.contentType === 'IMAGE') return true;
+    if (message.contentType === 'FILE') return false;
+    if (message.contentType === 'AUDIO') return false;
     return isLikelyMediaFile(message);
+  }
+
+  private isAudioAttachment(message: {
+    contentType?: MessageContentType | 'IMAGE' | 'FILE' | 'AUDIO' | string | null;
+    attachmentMime?: string | null;
+    attachmentName?: string | null;
+    attachmentUrl?: string | null;
+  }) {
+    const storageKind = this.attachmentStorageKind(message.attachmentUrl);
+    if (storageKind === 'audio') return true;
+    if (message.contentType === 'AUDIO') return true;
+    return false;
+  }
+
+  private mapReplyTo(replyTo: any) {
+    if (!replyTo) return null;
+    return {
+      id: replyTo.id,
+      body: replyTo.body ?? '',
+      contentType: this.isMediaAttachment(replyTo)
+        ? 'IMAGE'
+        : this.isAudioAttachment(replyTo)
+        ? 'AUDIO'
+        : replyTo.contentType,
+      attachmentUrl: replyTo.attachmentUrl ?? null,
+      attachmentName: this.normalizeAttachmentName(replyTo.attachmentName),
+      attachmentMime: replyTo.attachmentMime ?? null,
+      sender: replyTo.sender
+        ? {
+            id: replyTo.sender.id,
+            username: replyTo.sender.username,
+            name: replyTo.sender.name,
+            avatarUrl: replyTo.sender.avatarUrl ?? null,
+          }
+        : null,
+    };
+  }
+
+  private messageInclude() {
+    return {
+      sender: {
+        select: {
+          id: true,
+          username: true,
+          name: true,
+        },
+      },
+      replyTo: {
+        select: {
+          id: true,
+          body: true,
+          contentType: true,
+          attachmentUrl: true,
+          attachmentName: true,
+          attachmentMime: true,
+          sender: {
+            select: {
+              id: true,
+              username: true,
+              name: true,
+              avatarUrl: true,
+            },
+          },
+        },
+      },
+    };
   }
 
   private mapMessage(message: any) {
@@ -86,12 +166,24 @@ export class AdminHistoryService {
       conversationId: message.conversationId,
       senderId: message.senderId,
       body: message.body ?? '',
-      contentType: this.isMediaAttachment(message) ? 'IMAGE' : message.contentType,
+      contentType: this.isMediaAttachment(message)
+        ? 'IMAGE'
+        : this.isAudioAttachment(message)
+        ? 'AUDIO'
+        : message.contentType,
       attachmentUrl: message.attachmentUrl ?? null,
       attachmentName: this.normalizeAttachmentName(message.attachmentName),
       attachmentMime: message.attachmentMime ?? null,
       attachmentSize: message.attachmentSize ?? null,
+      replyToId: message.replyToId ?? null,
       deletedAt: message.deletedAt ?? null,
+      broadcastSource:
+        message.broadcastListId && message.broadcastListTitle
+          ? {
+              id: message.broadcastListId,
+              title: message.broadcastListTitle,
+            }
+          : null,
       sender: message.sender
         ? {
             id: message.sender.id,
@@ -99,6 +191,7 @@ export class AdminHistoryService {
             name: message.sender.name,
           }
         : null,
+      replyTo: this.mapReplyTo(message.replyTo),
     };
   }
 
@@ -113,8 +206,10 @@ export class AdminHistoryService {
     const attachmentName = this.normalizeAttachmentName(message.attachmentName);
     const isVideo = isLikelyVideoFile(message);
     const isMedia = this.isMediaAttachment(message);
+    const isAudio = this.isAudioAttachment(message);
     if (body) return body.slice(0, 160);
     if (isMedia) return isVideo ? '[Vídeo]' : '[Imagem]';
+    if (isAudio) return attachmentName ? `[Áudio] ${attachmentName}` : '[Áudio]';
     if (message.contentType === 'FILE') return attachmentName ? `[Arquivo] ${attachmentName}` : '[Arquivo]';
     return '';
   }
@@ -130,8 +225,10 @@ export class AdminHistoryService {
     const attachmentName = this.normalizeAttachmentName(message.attachmentName);
     const isVideo = isLikelyVideoFile(message);
     const isMedia = this.isMediaAttachment(message);
+    const isAudio = this.isAudioAttachment(message);
     if (body) return body.slice(0, 220);
     if (isMedia) return isVideo ? 'Vídeo' : 'Imagem';
+    if (isAudio) return attachmentName ? `Áudio: ${attachmentName}` : 'Áudio';
     if (message.contentType === 'FILE') return attachmentName ? `Arquivo: ${attachmentName}` : 'Arquivo';
     return '';
   }
@@ -164,7 +261,7 @@ export class AdminHistoryService {
 
   private deletedAttachmentBody(
     existingBody: string | null | undefined,
-    contentType: MessageContentType | 'IMAGE' | 'FILE',
+    contentType: MessageContentType | 'IMAGE' | 'FILE' | 'AUDIO',
   ) {
     const kind = contentType === 'IMAGE' ? 'IMAGE' : 'FILE';
     const notice = attachmentRemovalNoticeByType(kind);
@@ -241,7 +338,7 @@ export class AdminHistoryService {
         where: {
           deletedAt: null,
           attachmentUrl: { not: null },
-          contentType: 'FILE',
+          contentType: { in: ['FILE', 'AUDIO'] },
         },
       }),
     ]);
@@ -295,7 +392,7 @@ export class AdminHistoryService {
 
       const targets = await this.prisma.message.findMany({
         where: {
-          contentType: { in: ['IMAGE', 'FILE'] },
+          contentType: { in: ['IMAGE', 'FILE', 'AUDIO'] },
           attachmentUrl: { not: null },
           deletedAt: null,
         },
@@ -723,7 +820,7 @@ export class AdminHistoryService {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: pageSize,
       ...(input.cursor ? { skip: 1, cursor: { id: input.cursor } } : {}),
-      include: { sender: { select: { id: true, username: true, name: true } } },
+      include: this.messageInclude(),
     });
 
     const nextCursor = messages.length === pageSize ? messages[messages.length - 1].id : null;
@@ -745,11 +842,11 @@ export class AdminHistoryService {
         conversationId: input.conversationId,
         deletedAt: null,
         attachmentUrl: { not: null },
-        contentType: { in: ['IMAGE', 'FILE'] },
+        contentType: { in: ['IMAGE', 'FILE', 'AUDIO'] },
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: takeN,
-      include: { sender: { select: { id: true, username: true, name: true } } },
+      include: this.messageInclude(),
     });
 
     return {
@@ -757,7 +854,7 @@ export class AdminHistoryService {
       items: rows
         .map((m) => this.mapMessage(m))
         .filter((item) => {
-          const isMedia = this.isMediaAttachment(item);
+          const isMedia = this.isMediaAttachment(item) || this.isAudioAttachment(item);
           if (kind === 'image') return isMedia;
           if (kind === 'file') return !isMedia;
           return true;
@@ -779,13 +876,16 @@ export class AdminHistoryService {
           select: {
             userAId: true,
             userBId: true,
+            participants: {
+              select: { userId: true },
+            },
           },
         },
       },
     });
 
     if (!msg) throw new BadRequestException('Mensagem não encontrada');
-    if (!msg.attachmentUrl || (msg.contentType !== 'IMAGE' && msg.contentType !== 'FILE')) {
+    if (!msg.attachmentUrl || (msg.contentType !== 'IMAGE' && msg.contentType !== 'FILE' && msg.contentType !== 'AUDIO')) {
       throw new BadRequestException('Mensagem não possui anexo para exclusão');
     }
 
@@ -803,13 +903,21 @@ export class AdminHistoryService {
         body: this.deletedAttachmentBody(msg.body, msg.contentType),
         deletedAt: now,
       },
-      include: { sender: { select: { id: true, username: true, name: true } } },
+      include: this.messageInclude(),
     });
 
     return {
       ok: true,
       conversationId: msg.conversationId,
-      participantIds: [msg.conversation.userAId, msg.conversation.userBId],
+      participantIds: Array.from(
+        new Set(
+          [
+            ...(msg.conversation.participants ?? []).map((item) => item.userId),
+            msg.conversation.userAId,
+            msg.conversation.userBId,
+          ].filter((value): value is string => !!value),
+        ),
+      ),
       message: this.mapMessage(updated),
     };
   }
@@ -898,7 +1006,7 @@ export class AdminHistoryService {
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: half,
-      include: { sender: { select: { id: true, username: true, name: true } } },
+      include: this.messageInclude(),
     });
 
     const after = await this.prisma.message.findMany({
@@ -913,12 +1021,12 @@ export class AdminHistoryService {
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: takeN - 1 - before.length,
-      include: { sender: { select: { id: true, username: true, name: true } } },
+      include: this.messageInclude(),
     });
 
     const anchorFull = await this.prisma.message.findUnique({
       where: { id: anchor.id },
-      include: { sender: { select: { id: true, username: true, name: true } } },
+      include: this.messageInclude(),
     });
 
     if (!anchorFull) {
