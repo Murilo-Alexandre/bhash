@@ -10,6 +10,7 @@ type UserSummary = {
   email?: string | null;
   extension?: string | null;
   avatarUrl?: string | null;
+  isGroupAdmin?: boolean;
   company?: { id: string; name: string } | null;
   department?: { id: string; name: string } | null;
 };
@@ -22,17 +23,45 @@ type OrgSummary = {
 type BroadcastConfigInput = {
   title?: string;
   targetUserIds?: string[];
+  automaticRules?: GroupAutomaticRuleInput[];
   companyIds?: string[];
   departmentIds?: string[];
   excludedUserIds?: string[];
   includeAllUsers?: boolean;
 };
 
+type GroupAutomaticRuleInput = {
+  companyId?: string | null;
+  departmentId?: string | null;
+};
+
+type GroupConfigInput = {
+  title?: string;
+  memberIds?: string[];
+  automaticRules?: GroupAutomaticRuleInput[];
+  companyIds?: string[];
+  departmentIds?: string[];
+  includeAllUsers?: boolean;
+};
+
+type GroupDepartureReason = 'LEFT' | 'REMOVED' | 'GROUP_DELETED';
+
 type BroadcastConfigNormalized = {
   title: string;
   targetUserIds: string[];
-  companyIds: string[];
-  departmentIds: string[];
+  automaticRules: Array<{
+    companyId: string | null;
+    departmentId: string | null;
+  }>;
+  excludedUserIds: string[];
+  includeAllUsers: boolean;
+};
+
+type AutomaticAudienceConfigNormalized = {
+  rules: Array<{
+    companyId: string | null;
+    departmentId: string | null;
+  }>;
   excludedUserIds: string[];
   includeAllUsers: boolean;
 };
@@ -140,7 +169,18 @@ export class ConversationsService {
         orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
         select: {
           userId: true,
+          isAdmin: true,
           user: { select: this.userSelect() },
+        },
+      },
+      automaticRules: {
+        orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+        select: {
+          id: true,
+          companyId: true,
+          departmentId: true,
+          company: { select: this.orgSelect() },
+          department: { select: this.orgSelect() },
         },
       },
       broadcastTargets: {
@@ -178,9 +218,11 @@ export class ConversationsService {
     };
   }
 
-  private rankTimestamp(conv: { updatedAt?: string | Date; createdAt?: string | Date }) {
+  private rankTimestamp(conv: { sortAt?: string | Date; updatedAt?: string | Date; createdAt?: string | Date }) {
+    const sort = conv.sortAt ? new Date(conv.sortAt).getTime() : 0;
     const updated = conv.updatedAt ? new Date(conv.updatedAt).getTime() : 0;
     const created = conv.createdAt ? new Date(conv.createdAt).getTime() : 0;
+    if (Number.isFinite(sort) && sort > 0) return sort;
     return Number.isFinite(updated) && updated > 0 ? updated : created;
   }
 
@@ -222,7 +264,14 @@ export class ConversationsService {
 
   private participantUsersFromConversation(conv: any) {
     const participantUsers = Array.isArray(conv?.participants)
-      ? conv.participants.map((entry: any) => entry?.user as UserSummary | undefined)
+      ? conv.participants.map((entry: any) =>
+          entry?.user
+            ? ({
+                ...entry.user,
+                isGroupAdmin: !!entry?.isAdmin,
+              } as UserSummary)
+            : undefined,
+        )
       : [];
 
     return this.dedupeUsers([...participantUsers, conv?.userA ?? null, conv?.userB ?? null]);
@@ -238,6 +287,23 @@ export class ConversationsService {
         ].filter((value): value is string => !!value),
       ),
     );
+  }
+
+  private groupAdminIdsFromConversation(conv: any) {
+    if (conv?.kind !== 'GROUP') return [] as string[];
+    return Array.from(
+      new Set(
+        (Array.isArray(conv?.participants) ? conv.participants : [])
+          .filter((entry: any) => !!entry?.isAdmin)
+          .map((entry: any) => String(entry?.userId ?? '').trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  private groupAdminUsersFromConversation(conv: any) {
+    const adminIdSet = new Set(this.groupAdminIdsFromConversation(conv));
+    return this.participantUsersFromConversation(conv).filter((user) => adminIdSet.has(user.id));
   }
 
   private broadcastTargetsFromConversation(conv: any) {
@@ -268,12 +334,198 @@ export class ConversationsService {
     return this.dedupeUsers(users);
   }
 
+  private normalizeAutomaticRuleKey(companyId?: string | null, departmentId?: string | null) {
+    return `${String(companyId ?? '').trim() || '*'}::${String(departmentId ?? '').trim() || '*'}`;
+  }
+
+  private groupAutomaticRulesFromConversation(conv: any) {
+    const explicitRules = Array.isArray(conv?.automaticRules)
+      ? conv.automaticRules
+          .map((entry: any) => ({
+            id: String(entry?.id ?? '').trim(),
+            companyId: entry?.companyId ? String(entry.companyId).trim() : null,
+            departmentId: entry?.departmentId ? String(entry.departmentId).trim() : null,
+            company: (entry?.company as OrgSummary | undefined) ?? null,
+            department: (entry?.department as OrgSummary | undefined) ?? null,
+          }))
+          .filter((rule) => !!rule.companyId || !!rule.departmentId)
+      : [];
+
+    if (explicitRules.length) {
+      return explicitRules;
+    }
+
+    const legacyCompanies = Array.isArray(conv?.broadcastCompanyTargets)
+      ? conv.broadcastCompanyTargets
+          .map((entry: any) =>
+            entry?.companyId
+              ? ({
+                  id: String(entry.companyId).trim(),
+                  name: String(entry?.company?.name ?? '').trim(),
+                } as OrgSummary)
+              : null,
+          )
+          .filter((item: OrgSummary | null): item is OrgSummary => !!item?.id)
+      : [];
+    const legacyDepartments = Array.isArray(conv?.broadcastDepartmentTargets)
+      ? conv.broadcastDepartmentTargets
+          .map((entry: any) =>
+            entry?.departmentId
+              ? ({
+                  id: String(entry.departmentId).trim(),
+                  name: String(entry?.department?.name ?? '').trim(),
+                } as OrgSummary)
+              : null,
+          )
+          .filter((item: OrgSummary | null): item is OrgSummary => !!item?.id)
+      : [];
+
+    const companies = legacyCompanies.length ? legacyCompanies : [null];
+    const departments = legacyDepartments.length ? legacyDepartments : [null];
+    const rules = new Map<
+      string,
+      {
+        id: string;
+        companyId: string | null;
+        departmentId: string | null;
+        company: OrgSummary | null;
+        department: OrgSummary | null;
+      }
+    >();
+
+    for (const company of companies) {
+      for (const department of departments) {
+        if (!company?.id && !department?.id) continue;
+        const key = this.normalizeAutomaticRuleKey(company?.id ?? null, department?.id ?? null);
+        rules.set(key, {
+          id: key,
+          companyId: company?.id ?? null,
+          departmentId: department?.id ?? null,
+          company: company ?? null,
+          department: department ?? null,
+        });
+      }
+    }
+
+    return Array.from(rules.values());
+  }
+
+  private async normalizeAutomaticAudienceConfig(
+    myId: string,
+    input?: {
+      automaticRules?: GroupAutomaticRuleInput[];
+      companyIds?: string[];
+      departmentIds?: string[];
+      excludedUserIds?: string[];
+      includeAllUsers?: boolean;
+    },
+  ) {
+    const rules = new Map<string, { companyId: string | null; departmentId: string | null }>();
+    const explicitRules = Array.isArray(input?.automaticRules) ? input?.automaticRules : [];
+
+    for (const rule of explicitRules) {
+      const companyId = rule?.companyId ? String(rule.companyId).trim() : null;
+      const departmentId = rule?.departmentId ? String(rule.departmentId).trim() : null;
+      if (!companyId && !departmentId) continue;
+      rules.set(this.normalizeAutomaticRuleKey(companyId, departmentId), {
+        companyId,
+        departmentId,
+      });
+    }
+
+    if (!rules.size) {
+      const companyIds = this.normalizeIds(input?.companyIds);
+      const departmentIds = this.normalizeIds(input?.departmentIds);
+      const legacyCompanies = companyIds.length ? companyIds : [null];
+      const legacyDepartments = departmentIds.length ? departmentIds : [null];
+
+      for (const companyId of legacyCompanies) {
+        for (const departmentId of legacyDepartments) {
+          if (!companyId && !departmentId) continue;
+          rules.set(this.normalizeAutomaticRuleKey(companyId, departmentId), {
+            companyId,
+            departmentId,
+          });
+        }
+      }
+    }
+
+    const normalized: AutomaticAudienceConfigNormalized = {
+      rules: Array.from(rules.values()),
+      excludedUserIds: this.normalizeIds(input?.excludedUserIds).filter((userId) => userId !== myId),
+      includeAllUsers: !!input?.includeAllUsers,
+    };
+
+    await Promise.all([
+      this.requireActiveUsers(normalized.excludedUserIds),
+      this.requireCompanies(normalized.rules.map((rule) => rule.companyId).filter((value): value is string => !!value)),
+      this.requireDepartments(
+        normalized.rules.map((rule) => rule.departmentId).filter((value): value is string => !!value),
+      ),
+    ]);
+
+    return normalized;
+  }
+
+  private userMatchesAutomaticAudience(
+    user: { companyId?: string | null; departmentId?: string | null },
+    config: Pick<AutomaticAudienceConfigNormalized, 'rules' | 'includeAllUsers'>,
+  ) {
+    if (config.includeAllUsers) return true;
+    if (!config.rules.length) return false;
+    return config.rules.some((rule) => {
+      const companyOk = !rule.companyId || String(user.companyId ?? '') === rule.companyId;
+      const departmentOk = !rule.departmentId || String(user.departmentId ?? '') === rule.departmentId;
+      return companyOk && departmentOk;
+    });
+  }
+
+  private async resolveAutomaticGroupUsersFromConfig(
+    ownerId: string,
+    config: Pick<AutomaticAudienceConfigNormalized, 'rules' | 'excludedUserIds' | 'includeAllUsers'>,
+  ) {
+    if (!config.includeAllUsers && !config.rules.length) return [] as UserSummary[];
+
+    const dynamicUsers = await this.prisma.user.findMany({
+      where: {
+        isActive: true,
+        id: { not: ownerId },
+        ...(config.includeAllUsers
+          ? null
+          : {
+              OR: config.rules.map((rule) => ({
+                ...(rule.companyId ? { companyId: rule.companyId } : null),
+                ...(rule.departmentId ? { departmentId: rule.departmentId } : null),
+              })),
+            }),
+      },
+      select: this.userSelect(),
+      orderBy: [{ name: 'asc' }, { username: 'asc' }],
+    });
+
+    const excluded = new Set(config.excludedUserIds);
+    return dynamicUsers.filter((user) => !excluded.has(user.id));
+  }
+
   private directOtherUser(myId: string, conv: any) {
     return this.participantUsersFromConversation(conv).find((user) => user.id !== myId) ?? null;
   }
 
   private isCurrentParticipant(myId: string, conv: any) {
     return this.currentParticipantIdsFromConversation(conv).includes(myId);
+  }
+
+  private isGroupAdmin(myId: string, conv: any) {
+    return conv?.kind === 'GROUP' && this.groupAdminIdsFromConversation(conv).includes(myId);
+  }
+
+  private requireGroupAdminPermission(myId: string, conv: any, actionLabel: string) {
+    if (conv?.kind !== 'GROUP') {
+      throw new BadRequestException('Ação disponível apenas para grupos');
+    }
+    if (!this.isGroupAdmin(myId, conv)) {
+      throw new ForbiddenException(`Somente administradores do grupo podem ${actionLabel}`);
+    }
   }
 
   private resolveConversationTitle(myId: string, conv: any) {
@@ -300,9 +552,11 @@ export class ConversationsService {
     conversationId: string,
     userIds: string[],
     addedById?: string | null,
+    opts?: { adminUserIds?: string[] },
   ) {
     const ids = this.normalizeIds(userIds);
     if (!ids.length) return;
+    const adminIdSet = new Set(this.normalizeIds(opts?.adminUserIds));
 
     await this.prisma.conversationParticipant.createMany({
       data: ids.map((userId) => ({
@@ -310,9 +564,77 @@ export class ConversationsService {
         conversationId,
         userId,
         addedById: addedById ?? null,
+        isAdmin: adminIdSet.has(userId),
       })),
       skipDuplicates: true,
     });
+  }
+
+  private async clearGroupAutomaticAudience(conversationId: string, tx: any) {
+    await Promise.all([
+      tx.conversation.update({
+        where: { id: conversationId },
+        data: { broadcastIncludeAllUsers: false },
+      }),
+      tx.conversationAutomaticRule.deleteMany({ where: { conversationId } }),
+      tx.conversationBroadcastTarget.deleteMany({ where: { conversationId } }),
+      tx.conversationBroadcastCompany.deleteMany({ where: { conversationId } }),
+      tx.conversationBroadcastDepartment.deleteMany({ where: { conversationId } }),
+      tx.conversationBroadcastExcludedUser.deleteMany({ where: { conversationId } }),
+    ]);
+  }
+
+  private async deactivateGroupParticipantIds(
+    conversationId: string,
+    userIds: string[],
+    automaticAudience: AutomaticAudienceConfigNormalized,
+    reason: GroupDepartureReason,
+    tx: any,
+  ) {
+    const ids = this.normalizeIds(userIds);
+    if (!ids.length) return;
+
+    const leftAt = new Date();
+    await Promise.all([
+      tx.conversationParticipant.deleteMany({
+        where: { conversationId, userId: { in: ids } },
+      }),
+      ...ids.map((userId) =>
+        tx.conversationUserState.upsert({
+          where: { conversationId_userId: { conversationId, userId } },
+          update: {
+            hidden: false,
+            leftAt,
+            leftReason: reason,
+            lastReadAt: leftAt,
+          },
+          create: {
+            conversationId,
+            userId,
+            hidden: false,
+            leftAt,
+            leftReason: reason,
+            lastReadAt: leftAt,
+          },
+        }),
+      ),
+    ]);
+
+    if (this.hasAutomaticAudienceConfig(automaticAudience)) {
+      await Promise.all(
+        ids.map((userId) =>
+          tx.conversationBroadcastExcludedUser.upsert({
+            where: { conversationId_userId: { conversationId, userId } },
+            update: {},
+            create: {
+              id: randomUUID(),
+              conversationId,
+              userId,
+            },
+          }),
+        ),
+      );
+    }
   }
 
   private async ensureVisibleStates(
@@ -335,8 +657,8 @@ export class ConversationsService {
           },
           update:
             participantId === currentUserId
-              ? { hidden: false, leftAt: null, lastReadAt: now }
-              : { hidden: false, leftAt: null },
+              ? { hidden: false, leftAt: null, leftReason: null, lastReadAt: now }
+              : { hidden: false, leftAt: null, leftReason: null },
           create:
             participantId === currentUserId
               ? {
@@ -344,6 +666,7 @@ export class ConversationsService {
                   userId: participantId,
                   hidden: false,
                   leftAt: null,
+                  leftReason: null,
                   lastReadAt: now,
                 }
               : {
@@ -351,6 +674,7 @@ export class ConversationsService {
                   userId: participantId,
                   hidden: false,
                   leftAt: null,
+                  leftReason: null,
                 },
         }),
       ),
@@ -410,25 +734,27 @@ export class ConversationsService {
     input: BroadcastConfigInput,
     opts?: { requireTitle?: boolean },
   ) {
+    const automaticAudience = await this.normalizeAutomaticAudienceConfig(myId, {
+      automaticRules: input?.automaticRules,
+      companyIds: input?.companyIds,
+      departmentIds: input?.departmentIds,
+      excludedUserIds: input?.excludedUserIds,
+      includeAllUsers: input?.includeAllUsers,
+    });
+
     const normalized: BroadcastConfigNormalized = {
       title: String(input?.title ?? '').trim(),
       targetUserIds: this.normalizeIds(input?.targetUserIds).filter((userId) => userId !== myId),
-      companyIds: this.normalizeIds(input?.companyIds),
-      departmentIds: this.normalizeIds(input?.departmentIds),
-      excludedUserIds: this.normalizeIds(input?.excludedUserIds).filter((userId) => userId !== myId),
-      includeAllUsers: !!input?.includeAllUsers,
+      automaticRules: automaticAudience.rules,
+      excludedUserIds: automaticAudience.excludedUserIds,
+      includeAllUsers: automaticAudience.includeAllUsers,
     };
 
     if (opts?.requireTitle && normalized.title.length < 2) {
       throw new BadRequestException('Informe um nome para a lista de transmissão');
     }
 
-    await Promise.all([
-      this.requireActiveUsers(normalized.targetUserIds),
-      this.requireActiveUsers(normalized.excludedUserIds),
-      this.requireCompanies(normalized.companyIds),
-      this.requireDepartments(normalized.departmentIds),
-    ]);
+    await this.requireActiveUsers(normalized.targetUserIds);
 
     const effectiveTargets = await this.resolveBroadcastAudienceUsersFromConfig(myId, normalized);
     if (!effectiveTargets.length) {
@@ -438,31 +764,90 @@ export class ConversationsService {
     return normalized;
   }
 
+  private hasAutomaticAudienceConfig(
+    config?: Pick<AutomaticAudienceConfigNormalized, 'rules' | 'includeAllUsers'> | null,
+  ) {
+    return !!config?.includeAllUsers || !!config?.rules?.length;
+  }
+
+  private async replaceGroupAutomaticAudience(
+    conversationId: string,
+    config: AutomaticAudienceConfigNormalized,
+    tx: any,
+  ) {
+    await Promise.all([
+      tx.conversation.update({
+        where: { id: conversationId },
+        data: { broadcastIncludeAllUsers: config.includeAllUsers },
+      }),
+      tx.conversationAutomaticRule.deleteMany({ where: { conversationId } }),
+      tx.conversationBroadcastCompany.deleteMany({ where: { conversationId } }),
+      tx.conversationBroadcastDepartment.deleteMany({ where: { conversationId } }),
+      ...(config.rules.length
+        ? [
+            tx.conversationAutomaticRule.createMany({
+              data: config.rules.map((rule) => ({
+                id: randomUUID(),
+                conversationId,
+                companyId: rule.companyId,
+                departmentId: rule.departmentId,
+              })),
+            }),
+          ]
+        : []),
+    ]);
+  }
+
+  private automaticAudienceConfigFromConversation(conv: any): AutomaticAudienceConfigNormalized {
+    return {
+      includeAllUsers: !!conv?.broadcastIncludeAllUsers,
+      rules: this.groupAutomaticRulesFromConversation(conv).map((rule) => ({
+        companyId: rule.companyId,
+        departmentId: rule.departmentId,
+      })),
+      excludedUserIds: Array.isArray(conv?.broadcastExcludedUsers)
+        ? conv.broadcastExcludedUsers.map((entry: any) => String(entry?.userId ?? '')).filter(Boolean)
+        : [],
+    };
+  }
+
   private async resolveBroadcastAudienceUsersFromConfig(
     ownerId: string,
     config: Pick<
       BroadcastConfigNormalized,
-      'targetUserIds' | 'companyIds' | 'departmentIds' | 'excludedUserIds' | 'includeAllUsers'
-    >,
+      'targetUserIds' | 'automaticRules' | 'excludedUserIds' | 'includeAllUsers'
+    > & {
+      companyIds?: string[];
+      departmentIds?: string[];
+    },
   ) {
     const explicitUsers = await this.requireActiveUsers(config.targetUserIds);
     const out = new Map<string, UserSummary>();
+    const automaticAudience = await this.normalizeAutomaticAudienceConfig(ownerId, {
+      automaticRules: config.automaticRules,
+      companyIds: config.companyIds,
+      departmentIds: config.departmentIds,
+      excludedUserIds: config.excludedUserIds,
+      includeAllUsers: config.includeAllUsers,
+    });
 
     for (const user of explicitUsers) {
       if (user.id !== ownerId) out.set(user.id, user);
     }
 
-    if (config.includeAllUsers || config.companyIds.length || config.departmentIds.length) {
+    if (automaticAudience.includeAllUsers || automaticAudience.rules.length) {
       const dynamicUsers = await this.prisma.user.findMany({
         where: {
           isActive: true,
           id: { not: ownerId },
-          OR: config.includeAllUsers
-            ? undefined
-            : [
-                ...(config.companyIds.length ? [{ companyId: { in: config.companyIds } }] : []),
-                ...(config.departmentIds.length ? [{ departmentId: { in: config.departmentIds } }] : []),
-              ],
+          ...(automaticAudience.includeAllUsers
+            ? null
+            : {
+                OR: automaticAudience.rules.map((rule) => ({
+                  ...(rule.companyId ? { companyId: rule.companyId } : null),
+                  ...(rule.departmentId ? { departmentId: rule.departmentId } : null),
+                })),
+              }),
         },
         select: this.userSelect(),
         orderBy: [{ name: 'asc' }, { username: 'asc' }],
@@ -471,7 +856,7 @@ export class ConversationsService {
       for (const user of dynamicUsers) out.set(user.id, user);
     }
 
-    for (const excludedUserId of config.excludedUserIds) {
+    for (const excludedUserId of automaticAudience.excludedUserIds) {
       out.delete(excludedUserId);
     }
 
@@ -485,12 +870,10 @@ export class ConversationsService {
       targetUserIds: Array.isArray(conv?.broadcastTargets)
         ? conv.broadcastTargets.map((entry: any) => String(entry?.userId ?? '')).filter(Boolean)
         : [],
-      companyIds: Array.isArray(conv?.broadcastCompanyTargets)
-        ? conv.broadcastCompanyTargets.map((entry: any) => String(entry?.companyId ?? '')).filter(Boolean)
-        : [],
-      departmentIds: Array.isArray(conv?.broadcastDepartmentTargets)
-        ? conv.broadcastDepartmentTargets.map((entry: any) => String(entry?.departmentId ?? '')).filter(Boolean)
-        : [],
+      automaticRules: this.groupAutomaticRulesFromConversation(conv).map((rule) => ({
+        companyId: rule.companyId,
+        departmentId: rule.departmentId,
+      })),
       excludedUserIds: Array.isArray(conv?.broadcastExcludedUsers)
         ? conv.broadcastExcludedUsers.map((entry: any) => String(entry?.userId ?? '')).filter(Boolean)
         : [],
@@ -504,6 +887,7 @@ export class ConversationsService {
   ) {
     await Promise.all([
       tx.conversationBroadcastTarget.deleteMany({ where: { conversationId } }),
+      tx.conversationAutomaticRule.deleteMany({ where: { conversationId } }),
       tx.conversationBroadcastCompany.deleteMany({ where: { conversationId } }),
       tx.conversationBroadcastDepartment.deleteMany({ where: { conversationId } }),
       tx.conversationBroadcastExcludedUser.deleteMany({ where: { conversationId } }),
@@ -520,23 +904,13 @@ export class ConversationsService {
       });
     }
 
-    if (config.companyIds.length) {
-      await tx.conversationBroadcastCompany.createMany({
-        data: config.companyIds.map((companyId) => ({
+    if (config.automaticRules.length) {
+      await tx.conversationAutomaticRule.createMany({
+        data: config.automaticRules.map((rule) => ({
           id: randomUUID(),
           conversationId,
-          companyId,
-        })),
-        skipDuplicates: true,
-      });
-    }
-
-    if (config.departmentIds.length) {
-      await tx.conversationBroadcastDepartment.createMany({
-        data: config.departmentIds.map((departmentId) => ({
-          id: randomUUID(),
-          conversationId,
-          departmentId,
+          companyId: rule.companyId,
+          departmentId: rule.departmentId,
         })),
         skipDuplicates: true,
       });
@@ -568,19 +942,28 @@ export class ConversationsService {
       where: {
         conversationId: conv.id,
         hiddenForUsers: { none: { userId: myId } },
-        ...(conv.kind === 'DIRECT'
-          ? {
-              NOT: {
-                senderId: myId,
-                broadcastListId: { not: null },
-              },
-            }
-          : {}),
         ...visibleDateWhere,
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: this.messageSelect(myId),
     });
+
+    const rankMessage =
+      conv.kind === 'DIRECT'
+        ? await this.prisma.message.findFirst({
+            where: {
+              conversationId: conv.id,
+              hiddenForUsers: { none: { userId: myId } },
+              NOT: {
+                senderId: myId,
+                broadcastListId: { not: null },
+              },
+              ...visibleDateWhere,
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            select: { createdAt: true },
+          })
+        : null;
 
     const unreadCount = await this.prisma.message.count({
       where: {
@@ -594,6 +977,7 @@ export class ConversationsService {
     });
 
     const participants = this.participantUsersFromConversation(conv);
+    const groupAdmins = this.groupAdminUsersFromConversation(conv);
     const otherUser = conv.kind === 'DIRECT' ? this.directOtherUser(myId, conv) : null;
     const explicitBroadcastTargets = this.broadcastTargetsFromConversation(conv);
     const effectiveBroadcastTargets =
@@ -607,18 +991,26 @@ export class ConversationsService {
       rawTitle: conv.title ?? null,
       avatarUrl: conv.avatarUrl ?? null,
       createdAt: conv.createdAt,
-      updatedAt: lastMessage?.createdAt ?? conv.updatedAt,
+      updatedAt: lastMessage?.createdAt ?? conv.updatedAt ?? conv.createdAt,
+      sortAt:
+        conv.kind === 'DIRECT'
+          ? rankMessage?.createdAt ?? conv.createdAt
+          : lastMessage?.createdAt ?? conv.updatedAt ?? conv.createdAt,
       createdById: conv.createdById ?? null,
       createdBy: conv.createdBy ?? null,
       otherUser,
       participants,
+      groupAdmins,
+      automaticRules: conv.kind === 'DIRECT' ? [] : this.groupAutomaticRulesFromConversation(conv),
       participantCount: participants.length,
       broadcastTargets: explicitBroadcastTargets,
       targetCount: effectiveBroadcastTargets.length,
       pinned,
       unreadCount,
       isCurrentParticipant: this.isCurrentParticipant(myId, conv),
+      isGroupAdmin: this.isGroupAdmin(myId, conv),
       leftAt: state?.leftAt ?? null,
+      leftReason: state?.leftReason ?? null,
       broadcastIncludeAllUsers: !!conv.broadcastIncludeAllUsers,
       ...(opts?.includeBroadcastAudienceDetails
         ? {
@@ -744,8 +1136,8 @@ export class ConversationsService {
     await this.ensureConversationParticipants(conv.id, [userAId, userBId], myId);
     await this.prisma.conversationUserState.upsert({
       where: { conversationId_userId: { conversationId: conv.id, userId: myId } },
-      update: { hidden: false, leftAt: null },
-      create: { conversationId: conv.id, userId: myId, hidden: false, leftAt: null },
+      update: { hidden: false, leftAt: null, leftReason: null },
+      create: { conversationId: conv.id, userId: myId, hidden: false, leftAt: null, leftReason: null },
     });
 
     return {
@@ -754,19 +1146,35 @@ export class ConversationsService {
     };
   }
 
-  async createGroup(myId: string, title: string, memberIds: string[]) {
-    const normalizedTitle = String(title ?? '').trim();
+  async createGroup(myId: string, input: GroupConfigInput) {
+    const normalizedTitle = String(input?.title ?? '').trim();
     if (normalizedTitle.length < 2) {
       throw new BadRequestException('Informe um nome para o grupo');
     }
 
-    const uniqueMembers = this.normalizeIds(memberIds).filter((value) => value !== myId);
-    if (!uniqueMembers.length) {
+    const uniqueMembers = this.normalizeIds(input?.memberIds).filter((value) => value !== myId);
+    const automaticAudience = await this.normalizeAutomaticAudienceConfig(myId, {
+      automaticRules: input?.automaticRules,
+      companyIds: input?.companyIds,
+      departmentIds: input?.departmentIds,
+      includeAllUsers: input?.includeAllUsers,
+      excludedUserIds: [],
+    });
+
+    const automaticMembers = this.hasAutomaticAudienceConfig(automaticAudience)
+      ? await this.resolveAutomaticGroupUsersFromConfig(myId, automaticAudience)
+      : [];
+
+    if (!uniqueMembers.length && !automaticMembers.length) {
       throw new BadRequestException('Selecione pelo menos uma pessoa para o grupo');
     }
 
     await this.requireActiveUsers(uniqueMembers);
-    const participantIds = [myId, ...uniqueMembers];
+    const participantIds = this.normalizeIds([
+      myId,
+      ...uniqueMembers,
+      ...automaticMembers.map((user) => user.id),
+    ]);
 
     const conv = await this.prisma.conversation.create({
       data: {
@@ -774,12 +1182,16 @@ export class ConversationsService {
         kind: 'GROUP',
         title: normalizedTitle,
         createdById: myId,
+        broadcastIncludeAllUsers: automaticAudience.includeAllUsers,
       },
       select: { id: true },
     });
 
-    await this.ensureConversationParticipants(conv.id, participantIds, myId);
+    await this.ensureConversationParticipants(conv.id, participantIds, myId, { adminUserIds: [myId] });
     await this.ensureVisibleStates(conv.id, participantIds, myId);
+    if (this.hasAutomaticAudienceConfig(automaticAudience)) {
+      await this.replaceGroupAutomaticAudience(conv.id, automaticAudience, this.prisma);
+    }
 
     return {
       ok: true,
@@ -859,15 +1271,44 @@ export class ConversationsService {
     };
   }
 
-  async addGroupParticipants(myId: string, conversationId: string, userIds: string[]) {
+  async addGroupParticipants(
+    myId: string,
+    conversationId: string,
+    input: {
+      userIds?: string[];
+      automaticRules?: GroupAutomaticRuleInput[];
+      companyIds?: string[];
+      departmentIds?: string[];
+      includeAllUsers?: boolean;
+    },
+  ) {
     const conv = await this.assertCurrentParticipant(myId, conversationId);
     if (conv.kind !== 'GROUP') {
       throw new BadRequestException('Somente grupos aceitam novos participantes');
     }
+    this.requireGroupAdminPermission(myId, conv, 'adicionar pessoas');
 
     const existingIds = new Set(this.participantUsersFromConversation(conv).map((user) => user.id));
-    const newIds = this.normalizeIds(userIds).filter((value) => value && !existingIds.has(value));
-    if (!newIds.length) {
+    const normalizedManualIds = this.normalizeIds(input?.userIds).filter((value) => value && !existingIds.has(value));
+    const automaticAudience = await this.normalizeAutomaticAudienceConfig(myId, {
+      automaticRules: input?.automaticRules,
+      companyIds: input?.companyIds,
+      departmentIds: input?.departmentIds,
+      includeAllUsers: input?.includeAllUsers,
+      excludedUserIds: this.automaticAudienceConfigFromConversation(conv).excludedUserIds,
+    });
+    const automaticMemberIds = this.hasAutomaticAudienceConfig(automaticAudience)
+      ? (
+          await this.resolveAutomaticGroupUsersFromConfig(myId, automaticAudience)
+        )
+          .map((user) => user.id)
+          .filter((userId) => !existingIds.has(userId))
+      : [];
+    const newIds = this.normalizeIds([...normalizedManualIds, ...automaticMemberIds]).filter(
+      (value) => value && !existingIds.has(value),
+    );
+
+    if (!newIds.length && !('automaticRules' in (input ?? {})) && !('includeAllUsers' in (input ?? {}))) {
       return {
         ok: true,
         conversation: await this.serializeConversationForUser(myId, conversationId),
@@ -878,8 +1319,21 @@ export class ConversationsService {
     await this.requireActiveUsers(newIds);
     const participantIds = [...existingIds, ...newIds];
 
-    await this.ensureConversationParticipants(conversationId, newIds, myId);
-    await this.ensureVisibleStates(conversationId, newIds);
+    if ('automaticRules' in (input ?? {}) || 'includeAllUsers' in (input ?? {})) {
+      await this.prisma.$transaction(async (tx) => {
+        await this.replaceGroupAutomaticAudience(conversationId, automaticAudience, tx);
+      });
+    }
+
+    if (newIds.length) {
+      await Promise.all([
+        this.ensureConversationParticipants(conversationId, newIds, myId),
+        this.ensureVisibleStates(conversationId, newIds),
+        this.prisma.conversationBroadcastExcludedUser.deleteMany({
+          where: { conversationId, userId: { in: newIds } },
+        }),
+      ]);
+    }
 
     return {
       ok: true,
@@ -895,48 +1349,220 @@ export class ConversationsService {
       throw new BadRequestException('Somente grupos podem ser deixados');
     }
 
-    const leftAt = new Date();
-    await this.prisma.$transaction([
-      this.prisma.conversationParticipant.deleteMany({
-        where: { conversationId, userId: myId },
-      }),
-      this.prisma.conversationUserState.upsert({
-        where: { conversationId_userId: { conversationId, userId: myId } },
-        update: {
-          hidden: false,
-          leftAt,
-          lastReadAt: leftAt,
-        },
-        create: {
-          conversationId,
-          userId: myId,
-          hidden: false,
-          leftAt,
-          lastReadAt: leftAt,
-        },
-      }),
-    ]);
+    const automaticAudience = this.automaticAudienceConfigFromConversation(conv);
+    const currentParticipantIds = this.currentParticipantIdsFromConversation(conv);
+    const remainingParticipantIds = currentParticipantIds.filter((userId) => userId !== myId);
+    const remainingAdminIds = this.groupAdminIdsFromConversation(conv).filter((userId) => userId !== myId);
 
-    const remainingParticipants = await this.prisma.conversationParticipant.findMany({
-      where: { conversationId },
-      select: { userId: true },
-    });
-
-    if (!remainingParticipants.length) {
-      await this.prisma.conversation.delete({ where: { id: conversationId } });
-      return {
-        ok: true,
-        conversationId,
-        remainingParticipantIds: [] as string[],
-      };
+    if (this.isGroupAdmin(myId, conv) && remainingParticipantIds.length > 0 && remainingAdminIds.length === 0) {
+      throw new BadRequestException('Promova outro participante como admin antes de sair do grupo');
     }
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.deactivateGroupParticipantIds(conversationId, [myId], automaticAudience, 'LEFT', tx);
+      if (!remainingParticipantIds.length) {
+        await this.clearGroupAutomaticAudience(conversationId, tx);
+      }
+    });
 
     return {
       ok: true,
       conversationId,
       conversation: await this.serializeConversationForUser(myId, conversationId),
-      remainingParticipantIds: remainingParticipants.map((item) => item.userId),
+      remainingParticipantIds,
     };
+  }
+
+  async setGroupAdmin(myId: string, conversationId: string, targetUserId: string, isAdmin: boolean) {
+    const conv = await this.assertCurrentParticipant(myId, conversationId);
+    if (conv.kind !== 'GROUP') {
+      throw new BadRequestException('Somente grupos possuem administradores');
+    }
+    this.requireGroupAdminPermission(myId, conv, 'gerenciar administradores do grupo');
+
+    const normalizedTargetUserId = String(targetUserId ?? '').trim();
+    if (!normalizedTargetUserId) {
+      throw new BadRequestException('Participante inválido');
+    }
+
+    const participantIds = this.currentParticipantIdsFromConversation(conv);
+    if (!participantIds.includes(normalizedTargetUserId)) {
+      throw new BadRequestException('Esse usuário não faz mais parte do grupo');
+    }
+
+    const nextAdminIds = new Set(this.groupAdminIdsFromConversation(conv));
+    if (isAdmin) {
+      nextAdminIds.add(normalizedTargetUserId);
+    } else {
+      nextAdminIds.delete(normalizedTargetUserId);
+    }
+
+    if (!nextAdminIds.size && participantIds.length > 0) {
+      throw new BadRequestException('O grupo precisa ter pelo menos um administrador');
+    }
+
+    await this.prisma.conversationParticipant.update({
+      where: {
+        conversationId_userId: {
+          conversationId,
+          userId: normalizedTargetUserId,
+        },
+      },
+      data: { isAdmin: !!isAdmin },
+    });
+
+    return {
+      ok: true,
+      conversation: await this.serializeConversationForUser(myId, conversationId),
+      participantIds,
+    };
+  }
+
+  async removeGroupParticipant(myId: string, conversationId: string, targetUserId: string) {
+    const conv = await this.assertCurrentParticipant(myId, conversationId);
+    if (conv.kind !== 'GROUP') {
+      throw new BadRequestException('Somente grupos permitem remover participantes');
+    }
+    this.requireGroupAdminPermission(myId, conv, 'remover pessoas do grupo');
+
+    const normalizedTargetUserId = String(targetUserId ?? '').trim();
+    if (!normalizedTargetUserId || normalizedTargetUserId === myId) {
+      throw new BadRequestException('Use a opção de sair do grupo para remover você mesmo');
+    }
+
+    const participantIds = this.currentParticipantIdsFromConversation(conv);
+    if (!participantIds.includes(normalizedTargetUserId)) {
+      throw new BadRequestException('Esse usuário não faz mais parte do grupo');
+    }
+
+    const remainingParticipantIds = participantIds.filter((userId) => userId !== normalizedTargetUserId);
+    const remainingAdminIds = this.groupAdminIdsFromConversation(conv).filter((userId) => userId !== normalizedTargetUserId);
+    if (remainingParticipantIds.length > 0 && remainingAdminIds.length === 0) {
+      throw new BadRequestException('Promova outro participante como admin antes de remover esse usuário');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.deactivateGroupParticipantIds(
+        conversationId,
+        [normalizedTargetUserId],
+        this.automaticAudienceConfigFromConversation(conv),
+        'REMOVED',
+        tx,
+      );
+    });
+
+    return {
+      ok: true,
+      conversationId,
+      conversation: await this.serializeConversationForUser(myId, conversationId),
+      participantIds: remainingParticipantIds,
+      removedUserId: normalizedTargetUserId,
+    };
+  }
+
+  async deleteGroup(myId: string, conversationId: string) {
+    const conv = await this.assertCurrentParticipant(myId, conversationId);
+    if (conv.kind !== 'GROUP') {
+      throw new BadRequestException('Somente grupos podem ser excluídos');
+    }
+    this.requireGroupAdminPermission(myId, conv, 'excluir o grupo');
+
+    const participantIds = this.currentParticipantIdsFromConversation(conv);
+    await this.prisma.$transaction(async (tx) => {
+      await this.deactivateGroupParticipantIds(
+        conversationId,
+        participantIds,
+        this.automaticAudienceConfigFromConversation(conv),
+        'GROUP_DELETED',
+        tx,
+      );
+      await this.clearGroupAutomaticAudience(conversationId, tx);
+    });
+
+    return {
+      ok: true,
+      conversationId,
+      conversation: await this.serializeConversationForUser(myId, conversationId),
+      participantIds,
+    };
+  }
+
+  async syncAutomaticGroupMembershipsForUser(userId: string) {
+    const normalizedUserId = String(userId ?? '').trim();
+    if (!normalizedUserId) return [] as Array<{ conversationId: string; participantIds: string[] }>;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: normalizedUserId },
+      select: {
+        id: true,
+        isActive: true,
+        companyId: true,
+        departmentId: true,
+      },
+    });
+    if (!user?.isActive) return [] as Array<{ conversationId: string; participantIds: string[] }>;
+
+    const groupWhere: any = {
+      kind: 'GROUP',
+      OR: [
+        { broadcastIncludeAllUsers: true },
+        { automaticRules: { some: {} } },
+        ...(user.companyId ? [{ broadcastCompanyTargets: { some: { companyId: user.companyId } } }] : []),
+        ...(user.departmentId
+          ? [{ broadcastDepartmentTargets: { some: { departmentId: user.departmentId } } }]
+          : []),
+      ],
+    };
+    if (!groupWhere.OR.length) return [] as Array<{ conversationId: string; participantIds: string[] }>;
+
+    const groups = await this.prisma.conversation.findMany({
+      where: groupWhere,
+      select: {
+        id: true,
+        createdById: true,
+        broadcastIncludeAllUsers: true,
+        automaticRules: {
+          select: {
+            id: true,
+            companyId: true,
+            departmentId: true,
+          },
+        },
+        broadcastCompanyTargets: { select: { companyId: true } },
+        broadcastDepartmentTargets: { select: { departmentId: true } },
+        broadcastExcludedUsers: { select: { userId: true } },
+        participants: { select: { userId: true } },
+        states: {
+          where: { userId: normalizedUserId },
+          take: 1,
+          select: { leftAt: true },
+        },
+      },
+    });
+
+    const synced: Array<{ conversationId: string; participantIds: string[] }> = [];
+    for (const group of groups) {
+      const automaticAudience = this.automaticAudienceConfigFromConversation(group);
+      if (!this.hasAutomaticAudienceConfig(automaticAudience)) continue;
+      if (automaticAudience.excludedUserIds.includes(normalizedUserId)) continue;
+      if (group.participants.some((participant) => participant.userId === normalizedUserId)) continue;
+      if (group.states?.[0]?.leftAt) continue;
+
+      if (!this.userMatchesAutomaticAudience(user, automaticAudience)) continue;
+
+      await this.ensureConversationParticipants(group.id, [normalizedUserId], group.createdById ?? null);
+      await this.ensureVisibleStates(group.id, [normalizedUserId]);
+
+      synced.push({
+        conversationId: group.id,
+        participantIds: this.normalizeIds([
+          ...group.participants.map((participant) => participant.userId),
+          normalizedUserId,
+        ]),
+      });
+    }
+
+    return synced;
   }
 
   async listMine(myId: string, q?: string) {
@@ -1028,6 +1654,9 @@ export class ConversationsService {
     const conv = await this.assertCurrentParticipant(myId, conversationId);
     if (conv.kind === 'DIRECT') {
       throw new BadRequestException('Conversas diretas não possuem foto própria');
+    }
+    if (conv.kind === 'GROUP') {
+      this.requireGroupAdminPermission(myId, conv, 'alterar a foto do grupo');
     }
     if (conv.kind === 'BROADCAST' && conv.createdById !== myId) {
       throw new ForbiddenException('Somente quem criou a lista pode trocar a foto');

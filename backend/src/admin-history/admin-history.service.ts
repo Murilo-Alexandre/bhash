@@ -38,8 +38,19 @@ type AdminConvRow = {
     senderId: string;
     contentType: MessageContentType;
     attachmentName: string | null;
+    attachmentMime?: string | null;
+    attachmentUrl?: string | null;
     deletedAt: Date | null;
   }[];
+};
+
+type AdminGroupConvRow = {
+  id: string;
+  title: string | null;
+  avatarUrl: string | null;
+  updatedAt: Date;
+  participants: { userId: string }[];
+  states: { leftAt: Date | null }[];
 };
 
 type RetentionConfigRow = {
@@ -761,26 +772,108 @@ export class AdminHistoryService {
       } as any,
     })) as unknown as AdminConvRow[];
 
-    const items = convs.map((c) => {
-      const other = c.userA.id === userId ? c.userB : c.userA;
-      const last = c.messages?.[0] ?? null;
+    const sortConversationItems = <T extends { updatedAt: Date; lastMessage: { createdAt: Date } | null }>(
+      rows: T[],
+    ) =>
+      [...rows].sort((a, b) => {
+        const aTs = new Date(a.lastMessage?.createdAt ?? a.updatedAt).getTime();
+        const bTs = new Date(b.lastMessage?.createdAt ?? b.updatedAt).getTime();
+        return bTs - aTs;
+      });
 
-      return {
-        id: c.id,
-        updatedAt: c.updatedAt,
-        otherUser: other,
-        lastMessage: last
-          ? {
-              id: last.id,
-              createdAt: last.createdAt,
-              bodyPreview: this.messagePreview(last),
-              senderId: last.senderId,
-            }
-          : null,
-      };
-    });
+    const items = sortConversationItems(
+      convs.map((c) => {
+        const other = c.userA.id === userId ? c.userB : c.userA;
+        const last = c.messages?.[0] ?? null;
 
-    return { ok: true, items };
+        return {
+          id: c.id,
+          kind: 'DIRECT' as const,
+          updatedAt: c.updatedAt,
+          otherUser: other,
+          lastMessage: last
+            ? {
+                id: last.id,
+                createdAt: last.createdAt,
+                bodyPreview: this.messagePreview(last),
+                senderId: last.senderId,
+              }
+            : null,
+        };
+      }),
+    );
+
+    const groupRows = (await this.prisma.conversation.findMany({
+      where: {
+        kind: 'GROUP',
+        OR: [
+          { participants: { some: { userId } } },
+          { states: { some: { userId, leftAt: { not: null } } } },
+        ],
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        title: true,
+        avatarUrl: true,
+        updatedAt: true,
+        participants: {
+          select: { userId: true },
+        },
+        states: {
+          where: { userId },
+          take: 1,
+          select: { leftAt: true },
+        },
+      },
+    })) as AdminGroupConvRow[];
+
+    const groupItems = await Promise.all(
+      groupRows.map(async (group) => {
+        const last = await this.prisma.message.findFirst({
+          where: { conversationId: group.id },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: {
+            id: true,
+            createdAt: true,
+            body: true,
+            senderId: true,
+            contentType: true,
+            attachmentName: true,
+            attachmentMime: true,
+            attachmentUrl: true,
+            deletedAt: true,
+          },
+        });
+
+        const isActive = group.participants.some((participant) => participant.userId === userId);
+        return {
+          id: group.id,
+          kind: 'GROUP' as const,
+          status: isActive ? ('active' as const) : ('excluded' as const),
+          title: String(group.title ?? '').trim() || 'Grupo',
+          avatarUrl: group.avatarUrl ?? null,
+          updatedAt: group.updatedAt,
+          participantCount: group.participants.length,
+          leftAt: group.states?.[0]?.leftAt ?? null,
+          lastMessage: last
+            ? {
+                id: last.id,
+                createdAt: last.createdAt,
+                bodyPreview: this.messagePreview(last),
+                senderId: last.senderId,
+              }
+            : null,
+        };
+      }),
+    );
+
+    return {
+      ok: true,
+      items,
+      activeGroups: sortConversationItems(groupItems.filter((item) => item.status === 'active')),
+      excludedGroups: sortConversationItems(groupItems.filter((item) => item.status === 'excluded')),
+    };
   }
 
   // =========================

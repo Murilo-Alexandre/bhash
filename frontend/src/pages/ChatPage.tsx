@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, MouseEvent as ReactMouseEvent } from "react";
+import { createPortal } from "react-dom";
 import { unzipSync } from "fflate";
 import readXlsxFile from "read-excel-file/browser";
 import type { Socket } from "socket.io-client";
@@ -18,6 +19,7 @@ type UserMini = {
   email?: string | null;
   extension?: string | null;
   avatarUrl?: string | null;
+  isGroupAdmin?: boolean;
   company?: { id: string; name: string } | null;
   department?: { id: string; name: string } | null;
 };
@@ -25,6 +27,14 @@ type UserMini = {
 type OrgMini = {
   id: string;
   name: string;
+};
+
+type AutomaticRuleItem = {
+  id: string;
+  companyId?: string | null;
+  departmentId?: string | null;
+  company?: OrgMini | null;
+  department?: OrgMini | null;
 };
 
 type BroadcastSource = {
@@ -85,6 +95,7 @@ type Message = {
 };
 
 type ConversationKind = "DIRECT" | "GROUP" | "BROADCAST";
+type GroupDepartureReason = "LEFT" | "REMOVED" | "GROUP_DELETED";
 
 type ConversationListItem = {
   id: string;
@@ -94,10 +105,13 @@ type ConversationListItem = {
   avatarUrl?: string | null;
   createdAt?: string;
   updatedAt?: string;
+  sortAt?: string;
   createdById?: string | null;
   createdBy?: UserMini | null;
   otherUser?: UserMini | null;
   participants?: UserMini[];
+  groupAdmins?: UserMini[];
+  automaticRules?: AutomaticRuleItem[];
   participantCount?: number;
   broadcastTargets?: UserMini[];
   targetCount?: number;
@@ -111,7 +125,9 @@ type ConversationListItem = {
   unreadCount?: number;
   pinned?: boolean;
   isCurrentParticipant?: boolean;
+  isGroupAdmin?: boolean;
   leftAt?: string | null;
+  leftReason?: GroupDepartureReason | null;
 };
 
 type SearchHit = Message;
@@ -170,9 +186,11 @@ type ConversationMutationResponse = {
   conversation: ConversationListItem;
   participantIds?: string[];
   addedUserIds?: string[];
+  removedUserId?: string;
 };
 
 type CreatePickerMode = "direct" | "group" | "broadcast" | "group-members";
+type PickerGuideTone = "info" | "success" | "warning" | "danger";
 
 type MessagesResponse = {
   ok: true;
@@ -467,6 +485,12 @@ const PT_BR_COLLATOR = new Intl.Collator("pt-BR", {
 
 function compareAlpha(a?: string | null, b?: string | null) {
   return PT_BR_COLLATOR.compare((a ?? "").trim(), (b ?? "").trim());
+}
+
+function randomId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function normalizeText(v: string) {
@@ -2124,10 +2148,23 @@ function toAbsoluteUrl(url?: string | null) {
 }
 
 function conversationRankTimestamp(conv: ConversationListItem) {
-  const raw = conv.lastMessage?.createdAt ?? conv.updatedAt ?? conv.createdAt;
+  const raw = conv.sortAt ?? conv.updatedAt ?? conv.lastMessage?.createdAt ?? conv.createdAt;
   if (!raw) return 0;
   const ts = new Date(raw).getTime();
   return Number.isFinite(ts) ? ts : 0;
+}
+
+function nextConversationSortAt(
+  conv: ConversationListItem,
+  msg: Message,
+  meId?: string | null
+) {
+  const isMyBroadcastDirectCopy =
+    conv.kind === "DIRECT" && !!msg.broadcastSource && !!meId && msg.senderId === meId;
+  if (isMyBroadcastDirectCopy) {
+    return conv.sortAt ?? conv.updatedAt ?? conv.createdAt;
+  }
+  return msg.createdAt;
 }
 
 function sortConversationItems(items: ConversationListItem[]) {
@@ -2155,6 +2192,13 @@ function conversationKind(conv?: ConversationListItem | null): ConversationKind 
 
 function conversationParticipants(conv?: ConversationListItem | null) {
   return Array.isArray(conv?.participants) ? conv?.participants ?? [] : [];
+}
+
+function conversationGroupAdmins(conv?: ConversationListItem | null) {
+  if (Array.isArray(conv?.groupAdmins) && conv.groupAdmins.length) {
+    return conv.groupAdmins;
+  }
+  return conversationParticipants(conv).filter((user) => !!user.isGroupAdmin);
 }
 
 function conversationBroadcastTargets(conv?: ConversationListItem | null) {
@@ -2193,8 +2237,19 @@ function conversationSummaryLine(conv?: ConversationListItem | null) {
       Number(conv.participantCount ?? 0),
       conversationParticipants(conv).length,
     );
+    if (conv.isCurrentParticipant === false) {
+      if (conv.leftReason === "GROUP_DELETED") return "Grupo excluído";
+      if (count <= 0) {
+        if (conv.leftReason === "REMOVED") return "Você foi removido";
+        return "Você saiu";
+      }
+      const countLabel = count === 1 ? "1 participante" : `${count} participantes`;
+      if (conv.leftReason === "REMOVED") return `Você foi removido • ${countLabel}`;
+      return `Você saiu • ${countLabel}`;
+    }
+    if (count <= 0) return "Grupo encerrado";
     const countLabel = count === 1 ? "1 participante" : `${count} participantes`;
-    return conv.isCurrentParticipant === false ? `Você saiu • ${countLabel}` : countLabel;
+    return countLabel;
   }
 
   const count = Math.max(
@@ -2202,6 +2257,34 @@ function conversationSummaryLine(conv?: ConversationListItem | null) {
     conversationBroadcastTargets(conv).length,
   );
   return count === 1 ? "1 contato" : `${count} contatos`;
+}
+
+function inactiveGroupNotice(conv?: ConversationListItem | null) {
+  if (!conv || conversationKind(conv) !== "GROUP" || conv.isCurrentParticipant !== false) return null;
+  if (conv.leftReason === "GROUP_DELETED") {
+    return "Este grupo foi excluído. O histórico continua visível, mas novas mensagens não existem mais.";
+  }
+  if (conv.leftReason === "REMOVED") {
+    return "Você foi removido deste grupo. O histórico continua visível, mas você não pode enviar nem receber novas mensagens.";
+  }
+  return "Você saiu deste grupo. O histórico continua visível, mas você não pode enviar nem receber novas mensagens.";
+}
+
+function canManageGroupConversation(conv?: ConversationListItem | null, meId?: string | null) {
+  if (!conv || conversationKind(conv) !== "GROUP" || conv.isCurrentParticipant === false || !meId) return false;
+  if (typeof conv.isGroupAdmin === "boolean") return conv.isGroupAdmin;
+  return conversationGroupAdmins(conv).some((user) => user.id === meId);
+}
+
+function canManageConversationAvatar(conv?: ConversationListItem | null, meId?: string | null) {
+  if (!conv || conv.isCurrentParticipant === false || !meId) return false;
+  if (conversationKind(conv) === "GROUP") {
+    return canManageGroupConversation(conv, meId);
+  }
+  if (conversationKind(conv) === "BROADCAST") {
+    return conv.createdById === meId;
+  }
+  return false;
 }
 
 function computeBroadcastEffectiveUsers(
@@ -2238,11 +2321,46 @@ function computeBroadcastEffectiveUsers(
   return Array.from(out.values()).sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
 }
 
+function automaticRuleKey(companyId?: string | null, departmentId?: string | null) {
+  return `${String(companyId ?? "").trim() || "*"}::${String(departmentId ?? "").trim() || "*"}`;
+}
+
+function dedupeAutomaticRules(rules: AutomaticRuleItem[]) {
+  const seen = new Set<string>();
+  return rules.filter((rule) => {
+    const key = automaticRuleKey(rule.companyId ?? null, rule.departmentId ?? null);
+    if ((!rule.companyId && !rule.departmentId) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function computeAutomaticRuleUsers(
+  users: UserMini[],
+  ownerId: string | null | undefined,
+  rules: AutomaticRuleItem[],
+  includeAllUsers: boolean
+) {
+  const owner = String(ownerId ?? "").trim();
+  return users
+    .filter((user) => {
+      if (user.id === owner) return false;
+      if (includeAllUsers) return true;
+      return rules.some((rule) => {
+        const companyOk = !rule.companyId || user.company?.id === rule.companyId;
+        const departmentOk = !rule.departmentId || user.department?.id === rule.departmentId;
+        return companyOk && departmentOk;
+      });
+    })
+    .sort((a, b) => compareAlpha(a.name || a.username, b.name || b.username));
+}
+
 function buildConversationDetailsFallback(conversation: ConversationListItem, users: UserMini[]) {
   const participants = conversationParticipants(conversation);
   const base: ConversationListItem = {
     ...conversation,
     participants,
+    automaticRules: conversation.automaticRules ?? [],
     participantCount: Math.max(Number(conversation.participantCount ?? 0), participants.length),
   };
 
@@ -2428,18 +2546,78 @@ function PlusIcon() {
   );
 }
 
+function UserAddIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="M2 21a8 8 0 0 1 13.292-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="10" cy="8" r="5" stroke="currentColor" strokeWidth="2" />
+      <path d="M19 16v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M22 19h-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CheckSquareIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <rect x="4" y="4" width="16" height="16" rx="4" stroke="currentColor" strokeWidth="2" />
+      <path d="M8.5 12.2l2.4 2.4 4.8-5.1" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function InfoBadgeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 10.2v5.3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="12" cy="7.2" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function CheckCircleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <path d="M8.2 12.3 10.8 15l5.2-5.6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function WarningIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path
+        d="M12 3.8 21 19.2c.45.78-.1 1.8-1 1.8H4c-.9 0-1.45-1.02-1-1.8L12 3.8Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+      <path d="M12 9.2v4.9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="12" cy="17.1" r="1.1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function PickerGuideIcon({ tone }: { tone: PickerGuideTone }) {
+  if (tone === "success") return <CheckCircleIcon />;
+  if (tone === "warning" || tone === "danger") return <WarningIcon />;
+  return <InfoBadgeIcon />;
+}
+
 function ComposeConversationIcon() {
   return (
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
       <path
-        d="M7.2 5.75h8.45a4.55 4.55 0 0 1 4.55 4.55v.95a4.55 4.55 0 0 1-4.55 4.55h-4.5L7 19.95c-.7.55-1.72.05-1.72-.84v-3.08a4.5 4.5 0 0 1-2.48-4.03v-1.7a4.55 4.55 0 0 1 4.4-4.55Z"
+        d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"
         stroke="currentColor"
-        strokeWidth="1.9"
+        strokeWidth="2"
         strokeLinejoin="round"
         strokeLinecap="round"
       />
-      <circle cx="17.45" cy="7.55" r="3.1" fill="currentColor" />
-      <path d="M17.45 5.95v3.2M15.85 7.55h3.2" stroke="var(--bhash-primary)" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M12 8v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9 11h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
@@ -2521,19 +2699,13 @@ function HeadphonesIcon() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
       <path
-        d="M4.5 12a7.5 7.5 0 0 1 15 0"
+        d="M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Zm0 0a9 9 0 1 1 18 0m0 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"
         stroke="currentColor"
-        strokeWidth="1.9"
+        strokeWidth="2"
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
-      <path
-        d="M5.5 12.3h2.1c.5 0 .9.4.9.9v4.1c0 .5-.4.9-.9.9H6.3a1.8 1.8 0 0 1-1.8-1.8v-2.3c0-1 .8-1.8 1.8-1.8Z"
-        fill="currentColor"
-      />
-      <path
-        d="M16.4 12.3h2.1c1 0 1.8.8 1.8 1.8v2.3a1.8 1.8 0 0 1-1.8 1.8h-1.3c-.5 0-.9-.4-.9-.9v-4.1c0-.5.4-.9.9-.9Z"
-        fill="currentColor"
-      />
+      <path d="M21 16v2a4 4 0 0 1-4 4h-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
@@ -2610,7 +2782,55 @@ function StarIcon({ filled = false }: { filled?: boolean }) {
 function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true">
-      <path d="M4 7h16M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6 7l1 13h10l1-13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M10 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ClearConversationIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m16 22-1-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path
+        d="M19 14a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2h-3a1 1 0 0 1-1-1V4a2 2 0 0 0-4 0v5a1 1 0 0 1-1 1H6a2 2 0 0 0-2 2v1a1 1 0 0 0 1 1"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19 14H5l-1.973 6.767A1 1 0 0 0 4 22h16a1 1 0 0 0 .973-1.233z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="m8 22 1-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function EditAvatarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path
+        d="M12 4H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m14 6 4 4m-9.5 7.5 3.2-.8L20 8.4a1.4 1.4 0 0 0 0-2l-1.4-1.4a1.4 1.4 0 0 0-2 0l-8.3 8.3-.8 3.2Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -2628,6 +2848,16 @@ function CloseIcon() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
       <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function LogOutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m16 17 5-5-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M21 12H9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -2785,6 +3015,83 @@ function PinIcon({ filled = false }: { filled?: boolean }) {
   );
 }
 
+type EditableAvatarProps = {
+  imageUrl?: string | null;
+  fallback: string;
+  alt: string;
+  className?: string;
+  onError?: () => void;
+  onEdit?: () => void;
+  onRemove?: (() => void) | null;
+  busyLabel?: string | null;
+};
+
+function EditableAvatar({
+  imageUrl,
+  fallback,
+  alt,
+  className,
+  onError,
+  onEdit,
+  onRemove,
+  busyLabel,
+}: EditableAvatarProps) {
+  const editable = !!onEdit;
+  const removable = !!imageUrl && !!onRemove;
+
+  return (
+    <div
+      className={`${className ?? ""} ${editable ? "chat-avatarEditor" : ""} ${busyLabel ? "is-busy" : ""}`.trim()}
+      tabIndex={editable ? 0 : undefined}
+      role={editable ? "group" : undefined}
+      aria-label={editable ? (removable ? "Ações da foto" : imageUrl ? "Alterar foto" : "Enviar foto") : alt}
+    >
+      {imageUrl ? (
+        <img src={imageUrl} alt={alt} onError={onError} />
+      ) : (
+        <span>{fallback}</span>
+      )}
+
+      {editable ? (
+        <div className={`chat-avatarEditor__overlay ${removable ? "" : "is-single"}`.trim()}>
+          <button
+            type="button"
+            className="chat-avatarEditor__action chat-avatarEditor__action--edit"
+            onClick={(event) => {
+              event.stopPropagation();
+              onEdit?.();
+            }}
+            disabled={!!busyLabel}
+            aria-label={imageUrl ? "Alterar foto" : "Enviar foto"}
+          >
+            <EditAvatarIcon />
+          </button>
+          {removable ? (
+            <button
+              type="button"
+              className="chat-avatarEditor__action chat-avatarEditor__action--remove"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRemove?.();
+              }}
+              disabled={!!busyLabel}
+              aria-label="Remover foto"
+            >
+              <TrashIcon />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {busyLabel ? (
+        <div className="chat-avatarEditor__busy" aria-live="polite">
+          <span>{busyLabel}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatPage() {
   const { logoff, logout, api, token } = useAuth();
   const { theme, toggleTheme, resolvedLogoUrl } = useTheme();
@@ -2813,9 +3120,9 @@ export function ChatPage() {
   const [pickerSubmitting, setPickerSubmitting] = useState(false);
   const [pickerTitle, setPickerTitle] = useState("");
   const [pickerSelectedUserIds, setPickerSelectedUserIds] = useState<string[]>([]);
-  const [pickerSelectedCompanyIds, setPickerSelectedCompanyIds] = useState<string[]>([]);
-  const [pickerSelectedDepartmentIds, setPickerSelectedDepartmentIds] = useState<string[]>([]);
   const [pickerIncludeAllUsers, setPickerIncludeAllUsers] = useState(false);
+  const [pickerAutomaticRules, setPickerAutomaticRules] = useState<AutomaticRuleItem[]>([]);
+  const [pickerRuleManagerOpen, setPickerRuleManagerOpen] = useState(false);
   const [pickerConversationId, setPickerConversationId] = useState<string | null>(null);
   const [users, setUsers] = useState<UserMini[]>([]);
   const [userSearch, setUserSearch] = useState("");
@@ -2842,6 +3149,15 @@ export function ChatPage() {
   const [actionMenuAlign, setActionMenuAlign] = useState<"left" | "right">("right");
   const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
+  const [conversationMenuPosition, setConversationMenuPosition] = useState<{ top: number; left: number } | null>(
+    null
+  );
+  const [groupMemberMenuUserId, setGroupMemberMenuUserId] = useState<string | null>(null);
+  const [groupMemberMenuPosition, setGroupMemberMenuPosition] = useState<{ top: number; left: number } | null>(
+    null
+  );
+  const [pickerGuideOpen, setPickerGuideOpen] = useState(false);
+  const [pickerGuidePosition, setPickerGuidePosition] = useState<{ top: number; left: number } | null>(null);
   const [conversationSelectMode, setConversationSelectMode] = useState(false);
   const [selectedConversationIds, setSelectedConversationIds] = useState<string[]>([]);
   const [removeChatsPrompt, setRemoveChatsPrompt] = useState<{ ids: string[]; totalCount: number } | null>(null);
@@ -2888,6 +3204,8 @@ export function ChatPage() {
   const [conversationDetailsLegacyMode, setConversationDetailsLegacyMode] = useState(false);
   const [conversationAvatarUploading, setConversationAvatarUploading] = useState(false);
   const [conversationAvatarRemoving, setConversationAvatarRemoving] = useState(false);
+  const [conversationDetailsRemovingChat, setConversationDetailsRemovingChat] = useState(false);
+  const [groupDetailsActionKey, setGroupDetailsActionKey] = useState<string | null>(null);
   const [myInfoOpen, setMyInfoOpen] = useState(false);
 
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
@@ -2929,6 +3247,8 @@ export function ChatPage() {
   const pendingDeleteCountdownTimerRef = useRef<number | null>(null);
   const pendingConversationFinalizeTimerRef = useRef<number | null>(null);
   const pendingConversationCountdownTimerRef = useRef<number | null>(null);
+  const pickerGuideHideTimerRef = useRef<number | null>(null);
+  const pickerAutoManagedUserIdsRef = useRef<Set<string>>(new Set());
   const imageViewerConvIdRef = useRef<string | null>(null);
   const imageViewerDragRef = useRef<{
     active: boolean;
@@ -2938,6 +3258,12 @@ export function ChatPage() {
     originY: number;
   } | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const conversationMenuRef = useRef<HTMLDivElement | null>(null);
+  const conversationMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const groupMemberMenuRef = useRef<HTMLDivElement | null>(null);
+  const groupMemberMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const pickerGuideTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const pickerGuideTooltipRef = useRef<HTMLDivElement | null>(null);
 
   function rememberConversationRead(
     conversationId: string,
@@ -3057,6 +3383,8 @@ export function ChatPage() {
       setEmojiOpen(false);
       setAttachMenuOpen(false);
       setConversationMenuId(null);
+      setConversationMenuPosition(null);
+      conversationMenuTriggerRef.current = null;
       setReactionBarMsgId(null);
       setReactionPickerMsgId(null);
     }
@@ -3286,6 +3614,7 @@ export function ChatPage() {
           ...conv,
           lastMessage: msg,
           updatedAt: msg.createdAt,
+          sortAt: nextConversationSortAt(conv, msg, meIdRef.current),
           unreadCount: isActive ? 0 : isMine ? conv.unreadCount ?? 0 : (conv.unreadCount ?? 0) + 1,
         };
       });
@@ -4096,9 +4425,15 @@ export function ChatPage() {
     }
   }
 
-  async function loadConversations(selectConversationId?: string) {
-    setLoadingConvs(true);
-    setConversationsError(null);
+  async function loadConversations(
+    selectConversationId?: string,
+    options?: { silent?: boolean }
+  ) {
+    const silent = !!options?.silent;
+    if (!silent) {
+      setLoadingConvs(true);
+      setConversationsError(null);
+    }
     try {
       const res = await api.get<ConversationsResponse>("/conversations");
       const items = sortConversationItems(
@@ -4121,15 +4456,19 @@ export function ChatPage() {
         return conversationsRef.current;
       }
 
-      const apiMessage = e?.response?.data?.message;
-      setConversationsError(
-        typeof apiMessage === "string" && apiMessage.trim()
-          ? apiMessage.trim()
-          : "Não foi possível carregar as conversas agora."
-      );
+      if (!silent) {
+        const apiMessage = e?.response?.data?.message;
+        setConversationsError(
+          typeof apiMessage === "string" && apiMessage.trim()
+            ? apiMessage.trim()
+            : "Não foi possível carregar as conversas agora."
+        );
+      }
       throw e;
     } finally {
-      setLoadingConvs(false);
+      if (!silent) {
+        setLoadingConvs(false);
+      }
     }
   }
 
@@ -4308,9 +4647,9 @@ export function ChatPage() {
     setPickerSubmitting(false);
     setPickerTitle("");
     setPickerSelectedUserIds([]);
-    setPickerSelectedCompanyIds([]);
-    setPickerSelectedDepartmentIds([]);
     setPickerIncludeAllUsers(false);
+    setPickerAutomaticRules([]);
+    setPickerRuleManagerOpen(false);
     setPickerConversationId(null);
     setUserSearch("");
     setUserCompanyFilter("");
@@ -4319,15 +4658,30 @@ export function ChatPage() {
 
   function openCreatePicker(mode: CreatePickerMode, conversation?: ConversationListItem | null) {
     setCreateMenuOpen(false);
+    closeConversationMenu();
+    closeGroupMemberMenu();
     setPickerMode(mode);
     setPickerOpen(true);
     setPickerError(null);
     setPickerSubmitting(false);
     setPickerTitle(mode === "group-members" ? conversationDisplayName(conversation) : "");
     setPickerSelectedUserIds([]);
-    setPickerSelectedCompanyIds([]);
-    setPickerSelectedDepartmentIds([]);
-    setPickerIncludeAllUsers(false);
+    const conversationAutomaticRules = dedupeAutomaticRules(
+      (conversation?.automaticRules ?? []).map((rule) => ({
+        id: rule.id || automaticRuleKey(rule.companyId ?? null, rule.departmentId ?? null),
+        companyId: rule.companyId ?? rule.company?.id ?? null,
+        departmentId: rule.departmentId ?? rule.department?.id ?? null,
+        company: rule.company ?? null,
+        department: rule.department ?? null,
+      }))
+    );
+    const automaticEnabled =
+      mode === "group-members"
+        ? !!conversation?.broadcastIncludeAllUsers || conversationAutomaticRules.length > 0
+        : false;
+    setPickerIncludeAllUsers(automaticEnabled);
+    setPickerAutomaticRules(mode === "group-members" ? conversationAutomaticRules : []);
+    setPickerRuleManagerOpen(false);
     setPickerConversationId(conversation?.id ?? null);
     setUserSearch("");
     setUserCompanyFilter("");
@@ -4340,16 +4694,64 @@ export function ChatPage() {
     );
   }
 
-  function togglePickerCompanySelection(companyId: string) {
-    setPickerSelectedCompanyIds((prev) =>
-      prev.includes(companyId) ? prev.filter((id) => id !== companyId) : [...prev, companyId]
-    );
+  function toggleSelectAllPickerSearchResults() {
+    if (!pickerFilteredUserIds.length) return;
+
+    setPickerSelectedUserIds((prev) => {
+      const prevSet = new Set(prev);
+      const allSelected = pickerFilteredUserIds.every((userId) => prevSet.has(userId));
+      if (allSelected) {
+        return prev.filter((userId) => !pickerFilteredUserIds.includes(userId));
+      }
+
+      const next = [...prev];
+      for (const userId of pickerFilteredUserIds) {
+        if (!prevSet.has(userId)) {
+          next.push(userId);
+        }
+      }
+      return next;
+    });
   }
 
-  function togglePickerDepartmentSelection(departmentId: string) {
-    setPickerSelectedDepartmentIds((prev) =>
-      prev.includes(departmentId) ? prev.filter((id) => id !== departmentId) : [...prev, departmentId]
-    );
+  function openPickerRuleManager() {
+    if (!pickerAutomaticRules.length) {
+      setPickerAutomaticRules([
+        {
+          id: randomId(),
+          companyId: null,
+          departmentId: null,
+          company: null,
+          department: null,
+        },
+      ]);
+    }
+    setPickerRuleManagerOpen(true);
+  }
+
+  function handlePickerAutomaticAudienceToggle(nextValue: boolean) {
+    setPickerIncludeAllUsers(nextValue);
+    if (nextValue && pickerUsesPairedAutomaticRules) {
+      openPickerRuleManager();
+    }
+  }
+
+  function addEmptyPickerRule() {
+    setPickerAutomaticRules((prev) => [
+      ...prev,
+      { id: randomId(), companyId: null, departmentId: null, company: null, department: null },
+    ]);
+  }
+
+  function updatePickerAutomaticRule(
+    ruleId: string,
+    patch: Partial<Pick<AutomaticRuleItem, "companyId" | "departmentId" | "company" | "department">>
+  ) {
+    setPickerAutomaticRules((prev) => prev.map((rule) => (rule.id === ruleId ? { ...rule, ...patch } : rule)));
+  }
+
+  function removePickerAutomaticRule(ruleId: string) {
+    setPickerAutomaticRules((prev) => prev.filter((rule) => rule.id !== ruleId));
   }
 
   async function applyCreatedConversation(conversation: ConversationListItem) {
@@ -4395,6 +4797,8 @@ export function ChatPage() {
     setConversationDetailsLoading(true);
     setConversationDetailsError(null);
     setConversationDetailsLegacyMode(false);
+    setConversationDetailsRemovingChat(false);
+    setGroupDetailsActionKey(null);
     populateConversationDetailsForm(fallbackConversation);
     if (conversationKind(target) === "BROADCAST" && users.length === 0) {
       void loadUsers();
@@ -4492,8 +4896,12 @@ export function ChatPage() {
       setPickerError("Informe um nome para o grupo.");
       return;
     }
-    if (!pickerSelectedUserIds.length) {
-      setPickerError("Selecione pelo menos uma pessoa para o grupo.");
+    if (!pickerUsesPairedAutomaticRules && pickerIncludeAllUsers && pickerAutoAudienceUsesSearchOnly) {
+      setPickerError("Para incluir novos usuários automaticamente, use empresa/setor ou limpe a busca.");
+      return;
+    }
+    if (!pickerHasAudience) {
+      setPickerError("Selecione pessoas ou ative uma regra automática para o grupo.");
       return;
     }
 
@@ -4503,6 +4911,10 @@ export function ChatPage() {
       const res = await api.post<ConversationMutationResponse>("/conversations/group", {
         title,
         memberIds: pickerSelectedUserIds,
+        automaticRules: pickerAutomaticAudienceConfig.automaticRules,
+        companyIds: pickerAutomaticAudienceConfig.companyIds,
+        departmentIds: pickerAutomaticAudienceConfig.departmentIds,
+        includeAllUsers: pickerAutomaticAudienceConfig.includeAllUsers,
       });
       await applyCreatedConversation(res.data.conversation);
     } catch (e: any) {
@@ -4518,8 +4930,12 @@ export function ChatPage() {
       setPickerError("Informe um nome para a lista de transmissão.");
       return;
     }
-    if (!pickerBroadcastHasAudience) {
-      setPickerError("Selecione contatos ou marque uma regra automática para a lista.");
+    if (!pickerUsesPairedAutomaticRules && pickerIncludeAllUsers && pickerAutoAudienceUsesSearchOnly) {
+      setPickerError("Para incluir novos usuários automaticamente, use empresa/setor ou limpe a busca.");
+      return;
+    }
+    if (!pickerHasAudience) {
+      setPickerError("Selecione contatos ou ative uma regra automática para a lista.");
       return;
     }
 
@@ -4529,9 +4945,10 @@ export function ChatPage() {
       const res = await api.post<ConversationMutationResponse>("/conversations/broadcast", {
         title,
         targetUserIds: pickerSelectedUserIds,
-        companyIds: pickerSelectedCompanyIds,
-        departmentIds: pickerSelectedDepartmentIds,
-        includeAllUsers: pickerIncludeAllUsers,
+        automaticRules: pickerAutomaticAudienceConfig.automaticRules,
+        companyIds: pickerAutomaticAudienceConfig.companyIds,
+        departmentIds: pickerAutomaticAudienceConfig.departmentIds,
+        includeAllUsers: pickerAutomaticAudienceConfig.includeAllUsers,
       });
       await applyCreatedConversation(res.data.conversation);
     } catch (e: any) {
@@ -4544,8 +4961,12 @@ export function ChatPage() {
   async function addGroupParticipantsFromPicker() {
     const conversationId = pickerConversationId;
     if (!conversationId) return;
-    if (!pickerSelectedUserIds.length) {
-      setPickerError("Selecione pelo menos uma pessoa para adicionar.");
+    if (!pickerUsesPairedAutomaticRules && pickerIncludeAllUsers && pickerAutoAudienceUsesSearchOnly) {
+      setPickerError("Para incluir novos usuários automaticamente, use empresa/setor ou limpe a busca.");
+      return;
+    }
+    if (!pickerSelectedUserIds.length && !pickerAutomaticAudienceActive && !pickerIncludeAllUsers) {
+      setPickerError("Selecione pessoas ou ative uma regra automática para o grupo.");
       return;
     }
 
@@ -4554,6 +4975,10 @@ export function ChatPage() {
     try {
       const res = await api.post<ConversationMutationResponse>(`/conversations/${conversationId}/participants`, {
         userIds: pickerSelectedUserIds,
+        automaticRules: pickerAutomaticAudienceConfig.automaticRules,
+        companyIds: pickerAutomaticAudienceConfig.companyIds,
+        departmentIds: pickerAutomaticAudienceConfig.departmentIds,
+        includeAllUsers: pickerAutomaticAudienceConfig.includeAllUsers,
       });
       const updatedConversation = res.data.conversation;
       closePicker();
@@ -4609,6 +5034,85 @@ export function ChatPage() {
       await loadConversations(activeConvIdRef.current ?? undefined);
     } catch (e: any) {
       setSendErr(e?.response?.data?.message ?? e?.message ?? "Não foi possível sair do grupo.");
+    }
+  }
+
+  function removeConversationFromDetailsDrawer(conversation?: ConversationListItem | null) {
+    const target = conversation ?? conversationDetails ?? activeConv;
+    if (!target?.id) return;
+    if (conversationKind(target) === "GROUP" && target.isCurrentParticipant !== false) {
+      setConversationDetailsError("Saia do grupo antes de remover ele dos seus chats.");
+      return;
+    }
+    if (pendingDeleteBatch || pendingConversationHideBatch || pendingConversationClearBatch) {
+      showToast("Finalize a exclusão pendente ou desfaça antes de apagar mais chats.", 2200);
+      return;
+    }
+
+    setConversationDetailsRemovingChat(true);
+    setConversationDetailsError(null);
+    setConversationDetailsOpen(false);
+    queuePendingConversationHide([target.id]);
+    setConversationDetailsRemovingChat(false);
+  }
+
+  async function updateGroupAdmin(conversation: ConversationListItem, targetUser: UserMini, value: boolean) {
+    if (!conversation?.id) return;
+
+    setGroupDetailsActionKey(`${targetUser.id}:${value ? "promote" : "demote"}`);
+    setConversationDetailsError(null);
+    try {
+      const res = await api.patch<ConversationMutationResponse>(
+        `/conversations/${conversation.id}/participants/${targetUser.id}/admin`,
+        { value }
+      );
+      populateConversationDetailsForm(res.data.conversation);
+      applyConversationUpdateLocally(res.data.conversation);
+    } catch (e: any) {
+      setConversationDetailsError(
+        e?.response?.data?.message ?? `Não foi possível ${value ? "promover" : "rebaixar"} esse participante.`
+      );
+    } finally {
+      setGroupDetailsActionKey(null);
+    }
+  }
+
+  async function removeGroupParticipantFromDetails(conversation: ConversationListItem, targetUser: UserMini) {
+    if (!conversation?.id) return;
+    const ok = window.confirm(`Remover "${targetUser.name}" do grupo "${conversationDisplayName(conversation)}"?`);
+    if (!ok) return;
+
+    setGroupDetailsActionKey(`${targetUser.id}:remove`);
+    setConversationDetailsError(null);
+    try {
+      const res = await api.delete<ConversationMutationResponse>(
+        `/conversations/${conversation.id}/participants/${targetUser.id}`
+      );
+      populateConversationDetailsForm(res.data.conversation);
+      applyConversationUpdateLocally(res.data.conversation);
+    } catch (e: any) {
+      setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível remover esse participante.");
+    } finally {
+      setGroupDetailsActionKey(null);
+    }
+  }
+
+  async function deleteGroupFromDetails(conversation: ConversationListItem) {
+    if (!conversation?.id) return;
+    const ok = window.confirm(`Excluir o grupo "${conversationDisplayName(conversation)}" para todos?`);
+    if (!ok) return;
+
+    setGroupDetailsActionKey(`delete:${conversation.id}`);
+    setConversationDetailsError(null);
+    try {
+      const res = await api.delete<ConversationMutationResponse>(`/conversations/${conversation.id}/group`);
+      populateConversationDetailsForm(res.data.conversation);
+      applyConversationUpdateLocally(res.data.conversation);
+      await loadConversations(activeConvIdRef.current ?? undefined, { silent: true }).catch(() => {});
+    } catch (e: any) {
+      setConversationDetailsError(e?.response?.data?.message ?? "Não foi possível excluir o grupo.");
+    } finally {
+      setGroupDetailsActionKey(null);
     }
   }
 
@@ -4882,11 +5386,38 @@ export function ChatPage() {
         setSending(false);
       }
     } else {
-      socketRef.current?.emit("message:send", {
-        conversationId,
-        body: trimmed,
-        replyToId: replyTo?.id ?? null,
+      const socket = socketRef.current;
+      if (!socket) {
+        setSendErr("Conexão do chat indisponível. Tente novamente.");
+        return;
+      }
+
+      const ack = await new Promise<{ ok?: boolean; reason?: string } | null>((resolve) => {
+        let settled = false;
+        const finish = (value: { ok?: boolean; reason?: string } | null) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeoutId);
+          resolve(value);
+        };
+        const timeoutId = window.setTimeout(() => finish(null), 2500);
+
+        socket.emit(
+          "message:send",
+          {
+            conversationId,
+            body: trimmed,
+            replyToId: replyTo?.id ?? null,
+          },
+          (response?: { ok?: boolean; reason?: string }) => finish(response ?? null)
+        );
       });
+
+      if (ack?.ok === false) {
+        setSendErr(ack.reason?.trim() || "Nao foi possivel enviar a mensagem.");
+        return;
+      }
+
       scrollToBottom();
       setShowJumpNew(false);
       setNewMsgsCount(0);
@@ -4898,7 +5429,7 @@ export function ChatPage() {
     setEmojiOpen(false);
     setAttachMenuOpen(false);
     focusComposerInput();
-    void loadConversations(conversationId);
+    void loadConversations(conversationId, { silent: true }).catch(() => {});
   }
 
   async function toggleFavorite(message: Message) {
@@ -5203,6 +5734,18 @@ export function ChatPage() {
     () => new Set(pickerSelectedUserIds),
     [pickerSelectedUserIds]
   );
+  const pickerFilterCompanyIds = useMemo(() => {
+    if (!userCompanyFilter) return [];
+    return companyRuleOptions
+      .filter((item) => item.name === userCompanyFilter)
+      .map((item) => item.id);
+  }, [companyRuleOptions, userCompanyFilter]);
+  const pickerFilterDepartmentIds = useMemo(() => {
+    if (!userDepartmentFilter) return [];
+    return departmentRuleOptions
+      .filter((item) => item.name === userDepartmentFilter)
+      .map((item) => item.id);
+  }, [departmentRuleOptions, userDepartmentFilter]);
   const pickerConversation = useMemo(
     () => conversations.find((conv) => conv.id === pickerConversationId) ?? null,
     [conversations, pickerConversationId]
@@ -5243,11 +5786,280 @@ export function ChatPage() {
   }, [pickerAvailableUsers]);
   const pickerNeedsSelection = pickerMode === "group" || pickerMode === "broadcast" || pickerMode === "group-members";
   const pickerNeedsTitle = pickerMode === "group" || pickerMode === "broadcast";
-  const pickerBroadcastHasAudience =
-    pickerIncludeAllUsers ||
-    pickerSelectedCompanyIds.length > 0 ||
-    pickerSelectedDepartmentIds.length > 0 ||
-    pickerSelectedUserIds.length > 0;
+  const pickerCanUseAutomaticAudience =
+    pickerMode === "group" || pickerMode === "broadcast" || pickerMode === "group-members";
+  const pickerUsesPairedAutomaticRules =
+    pickerMode === "group" || pickerMode === "broadcast" || pickerMode === "group-members";
+  const pickerAutomaticAudienceCandidates = useMemo(() => {
+    if (pickerMode !== "group-members") return users;
+    const existingIds = new Set(conversationParticipants(pickerConversation).map((user) => user.id));
+    return users.filter((user) => !existingIds.has(user.id));
+  }, [pickerConversation, pickerMode, users]);
+  const pickerResolvedAutomaticRules = useMemo(() => {
+    if (!pickerUsesPairedAutomaticRules) return [];
+    return dedupeAutomaticRules(pickerAutomaticRules);
+  }, [pickerAutomaticRules, pickerUsesPairedAutomaticRules]);
+  const pickerAutoAudienceUsesSearchOnly =
+    !pickerUsesPairedAutomaticRules &&
+    pickerCanUseAutomaticAudience &&
+    !!userSearch.trim() &&
+    !pickerFilterCompanyIds.length &&
+    !pickerFilterDepartmentIds.length;
+  const pickerAutomaticAudienceScopeUsers = useMemo(() => {
+    if (!pickerCanUseAutomaticAudience || !pickerIncludeAllUsers || pickerAutoAudienceUsesSearchOnly) return [];
+    if (pickerUsesPairedAutomaticRules) {
+      return computeAutomaticRuleUsers(
+        pickerAutomaticAudienceCandidates,
+        me?.id ?? null,
+        pickerResolvedAutomaticRules,
+        !pickerResolvedAutomaticRules.length
+      );
+    }
+    return computeBroadcastEffectiveUsers(
+      pickerAutomaticAudienceCandidates,
+      me?.id ?? null,
+      [],
+      pickerFilterCompanyIds,
+      pickerFilterDepartmentIds,
+      [],
+      !pickerFilterCompanyIds.length && !pickerFilterDepartmentIds.length && !userSearch.trim()
+    );
+  }, [
+    me?.id,
+    pickerAutomaticAudienceCandidates,
+    pickerCanUseAutomaticAudience,
+    pickerFilterCompanyIds,
+    pickerFilterDepartmentIds,
+    pickerIncludeAllUsers,
+    pickerResolvedAutomaticRules,
+    pickerUsesPairedAutomaticRules,
+    userSearch,
+  ]);
+  const pickerAutomaticAudienceScopeUserIds = useMemo(
+    () => pickerAutomaticAudienceScopeUsers.map((user) => user.id),
+    [pickerAutomaticAudienceScopeUsers]
+  );
+  const pickerAutomaticAudienceScopeUserSet = useMemo(
+    () => new Set(pickerAutomaticAudienceScopeUserIds),
+    [pickerAutomaticAudienceScopeUserIds]
+  );
+  const pickerAutomaticAudienceActive =
+    pickerCanUseAutomaticAudience &&
+    pickerIncludeAllUsers &&
+    (pickerUsesPairedAutomaticRules || !pickerAutoAudienceUsesSearchOnly);
+  const pickerAutomaticAudienceConfig = useMemo(
+    () => ({
+      automaticRules:
+        pickerUsesPairedAutomaticRules && pickerAutomaticAudienceActive
+          ? pickerResolvedAutomaticRules.map((rule) => ({
+              companyId: rule.companyId ?? null,
+              departmentId: rule.departmentId ?? null,
+            }))
+          : [],
+      companyIds:
+        !pickerUsesPairedAutomaticRules && pickerAutomaticAudienceActive ? pickerFilterCompanyIds : [],
+      departmentIds:
+        !pickerUsesPairedAutomaticRules && pickerAutomaticAudienceActive ? pickerFilterDepartmentIds : [],
+      includeAllUsers:
+        pickerAutomaticAudienceActive &&
+        (pickerUsesPairedAutomaticRules
+          ? !pickerResolvedAutomaticRules.length
+          : !pickerFilterCompanyIds.length && !pickerFilterDepartmentIds.length && !userSearch.trim()),
+    }),
+    [
+      pickerAutomaticAudienceActive,
+      pickerFilterCompanyIds,
+      pickerFilterDepartmentIds,
+      pickerResolvedAutomaticRules,
+      pickerUsesPairedAutomaticRules,
+      userSearch,
+    ]
+  );
+  const pickerFilteredUserIds = useMemo(
+    () => pickerAvailableUsers.map((user) => user.id),
+    [pickerAvailableUsers]
+  );
+  const pickerAllFilteredSelected =
+    pickerFilteredUserIds.length > 0 &&
+    pickerFilteredUserIds.every((userId) => pickerSelectedUserSet.has(userId));
+  const pickerHasAudience =
+    pickerSelectedUserIds.length > 0 ||
+    pickerAutomaticAudienceActive;
+  const pickerSelectionLockedByAutomaticAudience =
+    pickerAutomaticAudienceActive && pickerAutomaticAudienceScopeUserIds.length > 0;
+  const pickerAutomaticAudienceGuide = useMemo(() => {
+    const searchValue = userSearch.trim();
+    const hasCompanyFilter = !!userCompanyFilter;
+    const hasDepartmentFilter = !!userDepartmentFilter;
+    const targetLabel = pickerMode === "broadcast" ? "nesta lista" : "neste grupo";
+    const activeRuleLabels = pickerResolvedAutomaticRules.map((rule) => {
+      const companyName = rule.company?.name ?? "todas as empresas";
+      const departmentName = rule.department?.name ?? "todos os setores";
+      return `${companyName} + ${departmentName}`;
+    });
+
+    if (pickerUsesPairedAutomaticRules) {
+      if (pickerAutomaticAudienceActive) {
+        if (pickerAutomaticAudienceConfig.includeAllUsers) {
+          return {
+            tone: "warning" as const,
+            title: "Inclusão automática ativa para todos os usuários",
+            description: `Além das pessoas escolhidas agora, todo usuário novo criado no sistema entrará automaticamente ${targetLabel}.`,
+            items: [
+              "Sem nenhuma regra salva, o sistema entende que este grupo deve aceitar todo mundo.",
+              "Use o botão de configurações para limitar por empresa e setor quando quiser algo mais específico.",
+              searchValue
+                ? `A busca "${searchValue}" continua servindo só para filtrar a lista visível agora.`
+                : "As regras automáticas agora são configuradas somente no botão de configurações.",
+            ],
+          };
+        }
+
+        return {
+          tone: "success" as const,
+          title:
+            activeRuleLabels.length === 1
+              ? "Inclusão automática ativa"
+              : `${activeRuleLabels.length} regras automáticas ativas`,
+          description: `Novos usuários compatíveis com essas regras entrarão automaticamente ${targetLabel}.`,
+          items: [
+            ...activeRuleLabels.map((label) => `Regra ativa: ${label}.`),
+            searchValue
+              ? `A busca "${searchValue}" continua filtrando só os resultados da tela; ela não altera as regras salvas.`
+              : "Você pode abrir o botão de configurações a qualquer momento para adicionar ou remover regras.",
+          ],
+        };
+      }
+
+      if (pickerAutomaticRules.length) {
+        return {
+          tone: "info" as const,
+          title: "Regras prontas para usar",
+          description: "As regras já estão salvas. Ligue “Incluir novos usuários” para começar a aplicá-las.",
+          items: activeRuleLabels.map((label) => `Regra configurada: ${label}.`),
+        };
+      }
+
+      return {
+        tone: "info" as const,
+        title: "Como funciona a inclusão automática",
+        description:
+          "A pesquisa acima serve só para encontrar pessoas na lista de agora. Para incluir usuários novos no futuro, use o botão de configurações.",
+        items: [
+          "O botão de configurações abre a tela onde você monta regras de empresa + setor.",
+          "Se você ligar “Incluir novos usuários” sem salvar nenhuma regra, o grupo passa a aceitar todos os usuários novos do sistema.",
+          "As regras ficam salvas mesmo desligadas, então você pode preparar tudo antes e ativar só quando quiser.",
+        ],
+      };
+    }
+
+    if (pickerIncludeAllUsers && pickerAutoAudienceUsesSearchOnly) {
+      return {
+        tone: "danger" as const,
+        title: "Assim não dá para ativar",
+        description:
+          "A busca por nome, e-mail ou ramal serve só para encontrar pessoas agora. Para adicionar novos usuários automaticamente, escolha empresa e/ou setor, ou limpe a busca para valer para todo mundo.",
+        items: [
+          `Busca atual: "${searchValue}" não cria uma regra automática sozinha.`,
+          "Se você quer todo mundo, limpe a busca e deixe empresa e setor em 'Todos'.",
+          "Se você quer um grupo específico, escolha empresa e/ou setor antes de ligar essa opção.",
+        ],
+      };
+    }
+
+    if (pickerAutomaticAudienceActive) {
+      if (pickerAutomaticAudienceConfig.includeAllUsers) {
+        return {
+          tone: "warning" as const,
+          title: "Regra automática ativa para todos os usuários",
+          description: `Além das pessoas escolhidas agora, todo usuário novo criado no sistema entrará automaticamente ${targetLabel}.`,
+          items: [
+            "Use isso somente quando essa lista ou grupo realmente for geral.",
+            "Se quiser limitar quem entra sozinho, escolha empresa e/ou setor antes de ativar.",
+            searchValue
+              ? `A busca "${searchValue}" vale só para os contatos visíveis agora; os novos usuários entrarão sem depender dessa busca.`
+              : "",
+          ].filter(Boolean),
+        };
+      }
+
+      const scopeParts: string[] = [];
+      if (hasCompanyFilter) scopeParts.push(`empresa ${userCompanyFilter}`);
+      if (hasDepartmentFilter) scopeParts.push(`setor ${userDepartmentFilter}`);
+      const scopeLabel = scopeParts.length ? scopeParts.join(" e ") : "todos os usuários";
+      return {
+        tone: "success" as const,
+        title: "Regra automática ativa",
+        description: `Além das pessoas escolhidas agora, novos usuários de ${scopeLabel} entrarão automaticamente ${targetLabel}.`,
+        items: [
+          hasCompanyFilter && hasDepartmentFilter
+            ? `Exemplo: se alguém novo for criado em ${userCompanyFilter} / ${userDepartmentFilter}, ele já entra sozinho.`
+            : hasCompanyFilter
+            ? `Todo usuário novo da empresa ${userCompanyFilter} entrará sozinho.`
+            : `Todo usuário novo do setor ${userDepartmentFilter} entrará sozinho.`,
+          searchValue
+            ? `A busca "${searchValue}" vale só para os contatos desta tela agora. A regra automática segue empresa e setor.`
+            : "Os contatos selecionados agora continuam entrando normalmente junto com os novos cadastros dessa regra.",
+        ],
+      };
+    }
+
+    if (searchValue && !hasCompanyFilter && !hasDepartmentFilter) {
+      return {
+        tone: "warning" as const,
+        title: "A busca de texto não cria regra automática",
+        description:
+          "Buscar por nome, e-mail ou ramal filtra apenas os contatos mostrados agora. Isso não serve para decidir quem vai entrar sozinho no futuro.",
+        items: [
+          `Com a busca "${searchValue}", use o botão para selecionar as pessoas visíveis agora.`,
+          "Para adicionar novos usuários automaticamente no futuro, escolha empresa e/ou setor e depois ligue essa opção.",
+          "Se quiser uma regra geral para todo mundo, limpe a busca e ative com empresa e setor em 'Todos'.",
+        ],
+      };
+    }
+
+    if (hasCompanyFilter || hasDepartmentFilter) {
+      const scopeParts: string[] = [];
+      if (hasCompanyFilter) scopeParts.push(`empresa ${userCompanyFilter}`);
+      if (hasDepartmentFilter) scopeParts.push(`setor ${userDepartmentFilter}`);
+      const scopeLabel = scopeParts.length ? scopeParts.join(" e ") : "todos os usuários";
+      return {
+        tone: "info" as const,
+        title: "Você já deixou a regra pronta",
+        description: `Se ligar essa opção agora, novos usuários de ${scopeLabel} entrarão automaticamente ${targetLabel}.`,
+        items: [
+          "Deixe desligado se você quer adicionar só os contatos atuais desta pesquisa.",
+          "Ligue quando quiser que os próximos cadastros com essa mesma configuração também entrem sozinhos.",
+          searchValue
+            ? `A busca "${searchValue}" vale só para a seleção de agora. A regra automática usará apenas empresa e setor.`
+            : "",
+        ].filter(Boolean),
+      };
+    }
+
+    return {
+      tone: "info" as const,
+      title: "Como funciona a entrada automática",
+      description: `Ative essa opção para colocar novos usuários automaticamente ${targetLabel}, sem precisar editar de novo depois.`,
+      items: [
+        "Use empresa e/ou setor para limitar quem entra sozinho.",
+        "Se você ativar com tudo limpo, a regra passa a valer para todos os usuários novos do sistema.",
+        "A busca por nome, e-mail ou ramal serve apenas para encontrar pessoas agora; ela não cria uma regra automática.",
+      ],
+    };
+  }, [
+    pickerAutoAudienceUsesSearchOnly,
+    pickerAutomaticAudienceActive,
+    pickerAutomaticAudienceConfig.includeAllUsers,
+    pickerAutomaticRules,
+    pickerIncludeAllUsers,
+    pickerMode,
+    pickerResolvedAutomaticRules,
+    pickerUsesPairedAutomaticRules,
+    userCompanyFilter,
+    userDepartmentFilter,
+    userSearch,
+  ]);
   const pickerPrimaryLabel =
     pickerMode === "group"
       ? "Criar grupo"
@@ -5256,12 +6068,24 @@ export function ChatPage() {
       : pickerMode === "group-members"
       ? "Adicionar pessoas"
       : "";
-  const pickerTitleLabel =
+  const pickerTitleSectionLabel =
     pickerMode === "group"
       ? "Nome do grupo"
       : pickerMode === "broadcast"
       ? "Nome da lista de transmissão"
       : "Nome";
+  const pickerTitlePlaceholder =
+    pickerMode === "group"
+      ? "De um nome para o grupo"
+      : pickerMode === "broadcast"
+      ? "De um nome para a lista"
+      : "Digite um nome";
+  const pickerAudienceSectionLabel =
+    pickerMode === "group" || pickerMode === "group-members"
+      ? "Participantes"
+      : pickerMode === "broadcast"
+      ? "Destinatários"
+      : "Contatos";
 
   const conversationDetailsEffectiveTargets = useMemo(() => {
     if (!conversationDetails || conversationKind(conversationDetails) !== "BROADCAST") return [];
@@ -5325,6 +6149,59 @@ export function ChatPage() {
   const showMobileMain = !isMobileLayout || !!activeConv;
   const canSendInActiveConversation =
     !!activeConv && !(conversationKind(activeConv) === "GROUP" && activeConv.isCurrentParticipant === false);
+  const conversationMenuConversation = useMemo(
+    () => conversations.find((conv) => conv.id === conversationMenuId) ?? null,
+    [conversations, conversationMenuId]
+  );
+  const conversationDetailsKind = conversationKind(conversationDetails ?? activeConv);
+  const conversationDetailsParticipants = conversationParticipants(conversationDetails);
+  const groupMemberMenuTarget = useMemo(
+    () => conversationDetailsParticipants.find((user) => user.id === groupMemberMenuUserId) ?? null,
+    [conversationDetailsParticipants, groupMemberMenuUserId]
+  );
+  const conversationDetailsCanManageGroup = canManageGroupConversation(conversationDetails, me?.id ?? null);
+  const conversationDetailsCanManageAvatar =
+    !conversationDetailsLegacyMode && canManageConversationAvatar(conversationDetails, me?.id ?? null);
+  const conversationDetailsCanEditBroadcast =
+    conversationDetailsKind === "BROADCAST" &&
+    conversationDetails?.createdById === me?.id &&
+    conversationDetails?.isCurrentParticipant !== false;
+
+  function closeConversationMenu() {
+    setConversationMenuId(null);
+    setConversationMenuPosition(null);
+    conversationMenuTriggerRef.current = null;
+  }
+
+  function closeGroupMemberMenu() {
+    setGroupMemberMenuUserId(null);
+    setGroupMemberMenuPosition(null);
+    groupMemberMenuTriggerRef.current = null;
+  }
+
+  function clearPickerGuideHideTimer() {
+    if (pickerGuideHideTimerRef.current != null) {
+      window.clearTimeout(pickerGuideHideTimerRef.current);
+      pickerGuideHideTimerRef.current = null;
+    }
+  }
+
+  function openPickerGuideTooltip() {
+    clearPickerGuideHideTimer();
+    setPickerGuideOpen(true);
+  }
+
+  function closePickerGuideTooltip(delay = 90) {
+    clearPickerGuideHideTimer();
+    if (delay <= 0) {
+      setPickerGuideOpen(false);
+      return;
+    }
+    pickerGuideHideTimerRef.current = window.setTimeout(() => {
+      setPickerGuideOpen(false);
+      pickerGuideHideTimerRef.current = null;
+    }, delay);
+  }
 
   useLayoutEffect(() => {
     const container = convListRef.current;
@@ -5472,6 +6349,76 @@ export function ChatPage() {
     void loadUsers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickerOpen, conversationDetailsOpen]);
+
+  useEffect(() => {
+    if (!groupMemberMenuUserId) return;
+    if (!groupMemberMenuTarget) {
+      closeGroupMemberMenu();
+    }
+  }, [groupMemberMenuTarget, groupMemberMenuUserId]);
+
+  useEffect(() => {
+    if (!groupMemberMenuUserId) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (groupMemberMenuRef.current?.contains(target)) return;
+      if (groupMemberMenuTriggerRef.current?.contains(target)) return;
+      closeGroupMemberMenu();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeGroupMemberMenu();
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [groupMemberMenuUserId]);
+
+  useEffect(() => {
+    if (!pickerAutomaticAudienceActive) {
+      pickerAutoManagedUserIdsRef.current = new Set();
+      return;
+    }
+
+    const previousManaged = pickerAutoManagedUserIdsRef.current;
+    const nextManagedSet = new Set(pickerAutomaticAudienceScopeUserIds);
+
+    setPickerSelectedUserIds((prev) => {
+      const next = prev.filter((userId) => !previousManaged.has(userId));
+      const nextSet = new Set(next);
+      for (const userId of pickerAutomaticAudienceScopeUserIds) {
+        if (nextSet.has(userId)) continue;
+        nextSet.add(userId);
+        next.push(userId);
+      }
+      if (next.length === prev.length && next.every((userId, index) => userId === prev[index])) {
+        return prev;
+      }
+      return next;
+    });
+    pickerAutoManagedUserIdsRef.current = nextManagedSet;
+  }, [pickerAutomaticAudienceActive, pickerAutomaticAudienceScopeUserIds]);
+
+  useEffect(() => {
+    if (pickerOpen && pickerCanUseAutomaticAudience) return;
+    setPickerGuideOpen(false);
+    setPickerGuidePosition(null);
+    pickerGuideTriggerRef.current = null;
+    clearPickerGuideHideTimer();
+  }, [pickerCanUseAutomaticAudience, pickerOpen]);
+
+  useEffect(
+    () => () => {
+      clearPickerGuideHideTimer();
+    },
+    []
+  );
 
   useEffect(() => {
     if (!imageViewerOpen) return;
@@ -5637,6 +6584,154 @@ export function ChatPage() {
     };
   }, [actionMenuAlign, actionMenuMsgId, reactionBarMsgId, reactionPickerMsgId]);
 
+  useLayoutEffect(() => {
+    if (!conversationMenuId) {
+      setConversationMenuPosition(null);
+      conversationMenuTriggerRef.current = null;
+      return;
+    }
+
+    const updatePosition = () => {
+      const trigger =
+        (conversationMenuTriggerRef.current?.isConnected ? conversationMenuTriggerRef.current : null) ??
+        convListRef.current?.querySelector<HTMLButtonElement>(`[data-conv-menu-trigger="${conversationMenuId}"]`) ??
+        null;
+      const menu = conversationMenuRef.current;
+      if (!trigger || !menu) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 6;
+
+      const availableBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+      const availableAbove = triggerRect.top - viewportPadding;
+      const shouldOpenUp = availableBelow < menuRect.height + gap && availableAbove > availableBelow;
+
+      const top = shouldOpenUp
+        ? Math.max(viewportPadding, triggerRect.top - menuRect.height - gap)
+        : Math.min(window.innerHeight - viewportPadding - menuRect.height, triggerRect.bottom + gap);
+
+      let left = triggerRect.right - menuRect.width;
+      left = Math.max(viewportPadding, Math.min(left, window.innerWidth - viewportPadding - menuRect.width));
+
+      setConversationMenuPosition((prev) =>
+        prev && prev.top === top && prev.left === left ? prev : { top, left }
+      );
+    };
+
+    const raf = requestAnimationFrame(updatePosition);
+    const scrollHost = convListRef.current;
+    scrollHost?.addEventListener("scroll", updatePosition, { passive: true });
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      scrollHost?.removeEventListener("scroll", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [conversationMenuId]);
+
+  useLayoutEffect(() => {
+    if (!groupMemberMenuUserId) {
+      setGroupMemberMenuPosition(null);
+      groupMemberMenuTriggerRef.current = null;
+      return;
+    }
+
+    const updatePosition = () => {
+      const trigger =
+        (groupMemberMenuTriggerRef.current?.isConnected ? groupMemberMenuTriggerRef.current : null) ??
+        document.querySelector<HTMLButtonElement>(`[data-group-member-menu-trigger="${groupMemberMenuUserId}"]`) ??
+        null;
+      const menu = groupMemberMenuRef.current;
+      if (!trigger || !menu) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 6;
+
+      const availableBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+      const availableAbove = triggerRect.top - viewportPadding;
+      const shouldOpenUp = availableBelow < menuRect.height + gap && availableAbove > availableBelow;
+
+      const top = shouldOpenUp
+        ? Math.max(viewportPadding, triggerRect.top - menuRect.height - gap)
+        : Math.min(window.innerHeight - viewportPadding - menuRect.height, triggerRect.bottom + gap);
+
+      let left = triggerRect.right - menuRect.width;
+      left = Math.max(viewportPadding, Math.min(left, window.innerWidth - viewportPadding - menuRect.width));
+
+      setGroupMemberMenuPosition((prev) =>
+        prev && prev.top === top && prev.left === left ? prev : { top, left }
+      );
+    };
+
+    const raf = requestAnimationFrame(updatePosition);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [groupMemberMenuUserId]);
+
+  useLayoutEffect(() => {
+    if (!pickerGuideOpen || !pickerOpen || !pickerCanUseAutomaticAudience) {
+      setPickerGuidePosition(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const trigger = pickerGuideTriggerRef.current?.isConnected ? pickerGuideTriggerRef.current : null;
+      const tooltip = pickerGuideTooltipRef.current;
+      if (!trigger || !tooltip) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 8;
+
+      const availableBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+      const availableAbove = triggerRect.top - viewportPadding;
+      const shouldOpenUp = availableBelow < tooltipRect.height + gap && availableAbove > availableBelow;
+
+      const top = shouldOpenUp
+        ? Math.max(viewportPadding, triggerRect.top - tooltipRect.height - gap)
+        : Math.min(window.innerHeight - viewportPadding - tooltipRect.height, triggerRect.bottom + gap);
+
+      let left = triggerRect.right - tooltipRect.width;
+      left = Math.max(viewportPadding, Math.min(left, window.innerWidth - viewportPadding - tooltipRect.width));
+
+      setPickerGuidePosition((prev) =>
+        prev && prev.top === top && prev.left === left ? prev : { top, left }
+      );
+    };
+
+    const raf = requestAnimationFrame(updatePosition);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [
+    pickerAutomaticAudienceGuide.description,
+    pickerAutomaticAudienceGuide.items,
+    pickerAutomaticAudienceGuide.title,
+    pickerAutomaticAudienceGuide.tone,
+    pickerCanUseAutomaticAudience,
+    pickerGuideOpen,
+    pickerOpen,
+  ]);
+
   return (
     <div className="chat-shell">
       <TopNav
@@ -5646,8 +6741,8 @@ export function ChatPage() {
         onToggleTheme={toggleTheme}
         logoSrc={resolvedLogoUrl}
         rightSlot={
-          <button className="chat-dangerBtn" onClick={logoff}>
-            Logoff
+          <button className="chat-dangerBtn topnav-logoutBtn" onClick={logoff} title="Logoff" aria-label="Logoff">
+            <LogOutIcon />
           </button>
         }
       />
@@ -5816,12 +6911,21 @@ export function ChatPage() {
                     {!conversationSelectMode ? (
                       <button
                         className={`chat-convMenuBtn ${conversationMenuId === conv.id ? "is-open" : ""}`}
+                        data-conv-menu-trigger={conv.id}
                         onClick={(e) => {
                           e.stopPropagation();
                           setActionMenuMsgId(null);
                           setReactionBarMsgId(null);
                           setReactionPickerMsgId(null);
-                          setConversationMenuId((prev) => (prev === conv.id ? null : conv.id));
+                          setConversationMenuPosition(null);
+                          conversationMenuTriggerRef.current = e.currentTarget;
+                          setConversationMenuId((prev) => {
+                            const next = prev === conv.id ? null : conv.id;
+                            if (!next) {
+                              conversationMenuTriggerRef.current = null;
+                            }
+                            return next;
+                          });
                         }}
                         title="Ações da conversa"
                       >
@@ -5829,54 +6933,6 @@ export function ChatPage() {
                       </button>
                     ) : null}
 
-                    {!conversationSelectMode && conversationMenuId === conv.id ? (
-                      <div className="chat-convMenu" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          className="chat-msgMenu__item"
-                          onClick={() => void setConversationPinned(conv.id, !conv.pinned)}
-                        >
-                          <PinIcon filled={!!conv.pinned} />
-                          <span>{conv.pinned ? "Desafixar conversa" : "Fixar conversa"}</span>
-                        </button>
-                        {conversationKind(conv) === "GROUP" ? (
-                          <button
-                            className="chat-msgMenu__item"
-                            onClick={() => {
-                              setConversationMenuId(null);
-                              openCreatePicker("group-members", conv);
-                            }}
-                          >
-                            <PlusIcon />
-                            <span>Adicionar pessoas</span>
-                          </button>
-                        ) : null}
-                        <button
-                          className="chat-msgMenu__item"
-                          onClick={() => void clearConversation(conv.id, title)}
-                        >
-                          <TrashIcon />
-                          <span>Limpar conversa</span>
-                        </button>
-                        {conversationKind(conv) === "GROUP" ? (
-                          <button
-                            className="chat-msgMenu__item chat-msgMenu__item--danger"
-                            onClick={() => void leaveGroup(conv)}
-                          >
-                            <CloseIcon />
-                            <span>Sair do grupo</span>
-                          </button>
-                        ) : null}
-                        {conversationKind(conv) !== "GROUP" || conv.isCurrentParticipant === false ? (
-                          <button
-                            className="chat-msgMenu__item chat-msgMenu__item--danger"
-                            onClick={() => void removeConversationFromList(conv.id)}
-                          >
-                            <CloseIcon />
-                            <span>Remover dos chats</span>
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : null}
                   </div>
                 );
               })
@@ -6332,7 +7388,7 @@ export function ChatPage() {
 
                             {showBroadcastOriginNotice ? (
                               <div className="chat-broadcastOrigin">
-                                Enviada pela lista de transmissão: <strong>{msg.broadcastSource?.title ?? "Lista"}</strong>
+                                Mensagem enviada pela lista de transmissão: <strong>{msg.broadcastSource?.title ?? "Lista"}</strong>
                               </div>
                             ) : null}
 
@@ -6772,194 +7828,343 @@ export function ChatPage() {
 
           <div className="chat-composerWrap" style={multiDeleteMode ? { display: "none" } : undefined}>
             {!canSendInActiveConversation && activeConv ? (
-              <div className="chat-composerNotice">
-                Você saiu deste grupo. O histórico continua visível, mas novas mensagens foram bloqueadas para você.
+              <div className="chat-composerNotice chat-composerNotice--composer">
+                {inactiveGroupNotice(activeConv)}
               </div>
-            ) : null}
-            {replyTo ? (
-              <div className="chat-replyComposer">
-                <div className="chat-replyComposer__text">
-                  <strong>Respondendo:</strong> {replyPreviewText(replyTo)}
-                </div>
-                <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setReplyTo(null)}>
-                  <CloseIcon />
-                </button>
-              </div>
-            ) : null}
-
-            {attachmentFile ? (
-              <div className="chat-attachmentPreview">
-                {attachmentMode === "audio" && attachmentPreviewUrl ? (
-                  <div className="chat-attachmentPreview__audio">
-                    <AudioMessagePlayer
-                      attachmentUrl={attachmentPreviewUrl}
-                      attachmentName={attachmentFile.name}
-                      showMeta={false}
-                    />
-                  </div>
-                ) : attachmentMode === "image" && attachmentPreviewUrl ? (
-                  isVideoFileLike(attachmentFile) ? (
-                    <video
-                      src={attachmentPreviewUrl}
-                      className="chat-attachmentPreview__image"
-                      preload="metadata"
-                      muted
-                      playsInline
-                    />
-                  ) : (
-                    <img src={attachmentPreviewUrl} alt="preview" className="chat-attachmentPreview__image" />
-                  )
-                ) : (
-                  <div className="chat-attachmentPreview__file">
-                    <FileIcon />
-                    <div>
-                      <div className="chat-attachmentPreview__fileName">{attachmentFile.name}</div>
-                      <div className="chat-attachmentPreview__fileMeta">{formatBytes(attachmentFile.size)}</div>
+            ) : (
+              <>
+                {replyTo ? (
+                  <div className="chat-replyComposer">
+                    <div className="chat-replyComposer__text">
+                      <strong>Respondendo:</strong> {replyPreviewText(replyTo)}
                     </div>
-                  </div>
-                )}
-
-                <button className="chat-iconBtn chat-iconBtn--sm" onClick={clearComposerAttachment}>
-                  <CloseIcon />
-                </button>
-              </div>
-            ) : null}
-
-            {sendErr ? <div className="chat-error">{sendErr}</div> : null}
-
-            <div className="chat-composer">
-              <div className="chat-composer__actions">
-                <button
-                  className={`chat-iconBtn ${emojiOpen ? "is-active" : ""}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setAttachMenuOpen(false);
-                    setEmojiOpen((prev) => !prev);
-                  }}
-                  title="Emojis"
-                  disabled={!activeConv || !canSendInActiveConversation}
-                >
-                  <SmileIcon />
-                </button>
-
-                <button
-                  className={`chat-iconBtn ${attachMenuOpen ? "is-active" : ""}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEmojiOpen(false);
-                    setAttachMenuOpen((prev) => !prev);
-                  }}
-                  title="Anexos"
-                  disabled={!activeConv || !canSendInActiveConversation}
-                >
-                  <PlusIcon />
-                </button>
-
-                {attachMenuOpen ? (
-                  <div className="chat-attachMenu" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      className="chat-attachMenu__item"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <FileIcon />
-                      <span>Documento</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="chat-attachMenu__item"
-                      onClick={() => imageInputRef.current?.click()}
-                    >
-                      <ImageIcon />
-                      <span>Fotos e vídeos</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="chat-attachMenu__item"
-                      onClick={() => audioInputRef.current?.click()}
-                    >
-                      <HeadphonesIcon />
-                      <span>Áudio</span>
+                    <button className="chat-iconBtn chat-iconBtn--sm" onClick={() => setReplyTo(null)}>
+                      <CloseIcon />
                     </button>
                   </div>
                 ) : null}
 
-                <input
-                  ref={imageInputRef}
-                  type="file"
-                  accept="image/*,video/*"
-                  style={{ display: "none" }}
-                  onChange={handleMediaPicked}
-                />
+                {attachmentFile ? (
+                  <div className="chat-attachmentPreview">
+                    {attachmentMode === "audio" && attachmentPreviewUrl ? (
+                      <div className="chat-attachmentPreview__audio">
+                        <AudioMessagePlayer
+                          attachmentUrl={attachmentPreviewUrl}
+                          attachmentName={attachmentFile.name}
+                          showMeta={false}
+                        />
+                      </div>
+                    ) : attachmentMode === "image" && attachmentPreviewUrl ? (
+                      isVideoFileLike(attachmentFile) ? (
+                        <video
+                          src={attachmentPreviewUrl}
+                          className="chat-attachmentPreview__image"
+                          preload="metadata"
+                          muted
+                          playsInline
+                        />
+                      ) : (
+                        <img src={attachmentPreviewUrl} alt="preview" className="chat-attachmentPreview__image" />
+                      )
+                    ) : (
+                      <div className="chat-attachmentPreview__file">
+                        <FileIcon />
+                        <div>
+                          <div className="chat-attachmentPreview__fileName">{attachmentFile.name}</div>
+                          <div className="chat-attachmentPreview__fileMeta">{formatBytes(attachmentFile.size)}</div>
+                        </div>
+                      </div>
+                    )}
 
-                <input
-                  ref={audioInputRef}
-                  type="file"
-                  accept="audio/*"
-                  style={{ display: "none" }}
-                  onChange={handleAudioPicked}
-                />
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  style={{ display: "none" }}
-                  onChange={handleFilePicked}
-                />
-              </div>
-
-              <div className="chat-composer__inputWrap">
-                <input
-                  ref={composerInputRef}
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder={
-                    activeConv
-                      ? canSendInActiveConversation
-                        ? "Digite sua mensagem..."
-                        : "Você saiu deste grupo"
-                      : "..."
-                  }
-                  className="chat-input chat-input--composer"
-                  disabled={!activeConv || sending || !canSendInActiveConversation}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      void sendMessage();
-                    }
-                  }}
-                />
-
-                {emojiOpen ? (
-                  <div className="chat-emojiPicker" onClick={(e) => e.stopPropagation()}>
-                    {EMOJIS.map((emoji) => (
-                      <button
-                        key={emoji}
-                        className="chat-emojiBtn"
-                        onClick={() => setText((prev) => prev + emoji)}
-                      >
-                        {emoji}
-                      </button>
-                    ))}
+                    <button className="chat-iconBtn chat-iconBtn--sm" onClick={clearComposerAttachment}>
+                      <CloseIcon />
+                    </button>
                   </div>
                 ) : null}
-              </div>
 
-              <button
-                className="chat-sendBtn"
-                onClick={() => void sendMessage()}
-                disabled={!activeConv || sending || !canSendInActiveConversation || (!text.trim() && !attachmentFile)}
-                aria-label={sending ? "Enviando mensagem" : "Enviar mensagem"}
-                title={sending ? "Enviando..." : "Enviar"}
-              >
-                <SendIcon />
-              </button>
-            </div>
+                {sendErr ? <div className="chat-error">{sendErr}</div> : null}
+
+                <div className="chat-composer">
+                  <div className="chat-composer__actions">
+                    <button
+                      className={`chat-iconBtn ${emojiOpen ? "is-active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setAttachMenuOpen(false);
+                        setEmojiOpen((prev) => !prev);
+                      }}
+                      title="Emojis"
+                      disabled={!activeConv}
+                    >
+                      <SmileIcon />
+                    </button>
+
+                    <button
+                      className={`chat-iconBtn ${attachMenuOpen ? "is-active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEmojiOpen(false);
+                        setAttachMenuOpen((prev) => !prev);
+                      }}
+                      title="Anexos"
+                      disabled={!activeConv}
+                    >
+                      <PlusIcon />
+                    </button>
+
+                    {attachMenuOpen ? (
+                      <div className="chat-attachMenu" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="chat-attachMenu__item"
+                          onClick={() => fileInputRef.current?.click()}
+                        >
+                          <FileIcon />
+                          <span>Documento</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-attachMenu__item"
+                          onClick={() => imageInputRef.current?.click()}
+                        >
+                          <ImageIcon />
+                          <span>Fotos e vídeos</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-attachMenu__item"
+                          onClick={() => audioInputRef.current?.click()}
+                        >
+                          <HeadphonesIcon />
+                          <span>Áudio</span>
+                        </button>
+                      </div>
+                    ) : null}
+
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      accept="image/*,video/*"
+                      style={{ display: "none" }}
+                      onChange={handleMediaPicked}
+                    />
+
+                    <input
+                      ref={audioInputRef}
+                      type="file"
+                      accept="audio/*"
+                      style={{ display: "none" }}
+                      onChange={handleAudioPicked}
+                    />
+
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      style={{ display: "none" }}
+                      onChange={handleFilePicked}
+                    />
+                  </div>
+
+                  <div className="chat-composer__inputWrap">
+                    <input
+                      ref={composerInputRef}
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                      placeholder={activeConv ? "Digite sua mensagem..." : "..."}
+                      className="chat-input chat-input--composer"
+                      disabled={!activeConv || sending}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void sendMessage();
+                        }
+                      }}
+                    />
+
+                    {emojiOpen ? (
+                      <div className="chat-emojiPicker" onClick={(e) => e.stopPropagation()}>
+                        {EMOJIS.map((emoji) => (
+                          <button
+                            key={emoji}
+                            className="chat-emojiBtn"
+                            onClick={() => setText((prev) => prev + emoji)}
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <button
+                    className="chat-sendBtn"
+                    onClick={() => void sendMessage()}
+                    disabled={!activeConv || sending || (!text.trim() && !attachmentFile)}
+                    aria-label={sending ? "Enviando mensagem" : "Enviar mensagem"}
+                    title={sending ? "Enviando..." : "Enviar"}
+                  >
+                    <SendIcon />
+                  </button>
+                </div>
+              </>
+            )}
           </div>
           </div>
         </main>
         ) : null}
       </div>
+
+      {pickerOpen && pickerCanUseAutomaticAudience && pickerGuideOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              id="picker-auto-guide-tooltip"
+              ref={pickerGuideTooltipRef}
+              className={`chat-pickerRuleTooltip chat-pickerRuleTooltip--${pickerAutomaticAudienceGuide.tone}`}
+              style={
+                pickerGuidePosition
+                  ? { top: pickerGuidePosition.top, left: pickerGuidePosition.left }
+                  : { visibility: "hidden" }
+              }
+              role="tooltip"
+              onMouseEnter={openPickerGuideTooltip}
+              onMouseLeave={() => closePickerGuideTooltip()}
+            >
+              <div className="chat-pickerRuleTooltip__head">
+                <div className="chat-pickerRuleTooltip__icon" aria-hidden="true">
+                  <PickerGuideIcon tone={pickerAutomaticAudienceGuide.tone} />
+                </div>
+                <div className="chat-pickerRuleTooltip__title">{pickerAutomaticAudienceGuide.title}</div>
+              </div>
+              <div className="chat-pickerRuleTooltip__text">{pickerAutomaticAudienceGuide.description}</div>
+              <div className="chat-pickerRuleTooltip__list">
+                {pickerAutomaticAudienceGuide.items.map((item) => (
+                  <div key={item} className="chat-pickerRuleTooltip__item">
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
+
+      {conversationMenuConversation && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={conversationMenuRef}
+              className="chat-convMenu chat-convMenu--floating"
+              style={
+                conversationMenuPosition
+                  ? { top: conversationMenuPosition.top, left: conversationMenuPosition.left }
+                  : { visibility: "hidden" }
+              }
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                className="chat-msgMenu__item"
+                onClick={() => {
+                  closeConversationMenu();
+                  void setConversationPinned(conversationMenuConversation.id, !conversationMenuConversation.pinned);
+                }}
+              >
+                <PinIcon filled={!!conversationMenuConversation.pinned} />
+                <span>{conversationMenuConversation.pinned ? "Desafixar conversa" : "Fixar conversa"}</span>
+              </button>
+              {conversationKind(conversationMenuConversation) === "GROUP" &&
+              canManageGroupConversation(conversationMenuConversation, me?.id ?? null) ? (
+                <button
+                  className="chat-msgMenu__item"
+                  onClick={() => {
+                    closeConversationMenu();
+                    openCreatePicker("group-members", conversationMenuConversation);
+                  }}
+                >
+                  <PlusIcon />
+                  <span>Adicionar pessoas</span>
+                </button>
+              ) : null}
+                <button
+                  className="chat-msgMenu__item"
+                  onClick={() => {
+                    closeConversationMenu();
+                    void clearConversation(
+                    conversationMenuConversation.id,
+                    conversationDisplayName(conversationMenuConversation)
+                  );
+                }}
+              >
+                <ClearConversationIcon />
+                <span>Limpar conversa</span>
+              </button>
+              {conversationKind(conversationMenuConversation) === "GROUP" &&
+              conversationMenuConversation.isCurrentParticipant !== false ? (
+                <button
+                  className="chat-msgMenu__item chat-msgMenu__item--danger"
+                  onClick={() => {
+                    closeConversationMenu();
+                    void leaveGroup(conversationMenuConversation);
+                  }}
+                >
+                  <LogOutIcon />
+                  <span>Sair do grupo</span>
+                </button>
+              ) : null}
+              {conversationKind(conversationMenuConversation) !== "GROUP" ||
+              conversationMenuConversation.isCurrentParticipant === false ? (
+                <button
+                  className="chat-msgMenu__item chat-msgMenu__item--danger"
+                  onClick={() => {
+                    closeConversationMenu();
+                    void removeConversationFromList(conversationMenuConversation.id);
+                  }}
+                >
+                  <CloseIcon />
+                  <span>Remover dos chats</span>
+                </button>
+              ) : null}
+            </div>,
+            document.body
+          )
+        : null}
+
+      {conversationDetails &&
+      groupMemberMenuTarget &&
+      typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={groupMemberMenuRef}
+              className="chat-msgMenu chat-msgMenu--floating"
+              style={
+                groupMemberMenuPosition
+                  ? { top: groupMemberMenuPosition.top, left: groupMemberMenuPosition.left }
+                  : { visibility: "hidden" }
+              }
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                className="chat-msgMenu__item"
+                onClick={() => {
+                  closeGroupMemberMenu();
+                  void updateGroupAdmin(conversationDetails, groupMemberMenuTarget, !groupMemberMenuTarget.isGroupAdmin);
+                }}
+              >
+                <CheckCircleIcon />
+                <span>{groupMemberMenuTarget.isGroupAdmin ? "Remover admin" : "Tornar admin"}</span>
+              </button>
+              <button
+                className="chat-msgMenu__item chat-msgMenu__item--danger"
+                onClick={() => {
+                  closeGroupMemberMenu();
+                  void removeGroupParticipantFromDetails(conversationDetails, groupMemberMenuTarget);
+                }}
+              >
+                <TrashIcon />
+                <span>Remover do grupo</span>
+              </button>
+            </div>,
+            document.body
+          )
+        : null}
 
       {myInfoOpen ? (
         <div className="chat-modalBackdrop" onClick={() => setMyInfoOpen(false)}>
@@ -6975,22 +8180,21 @@ export function ChatPage() {
               {(() => {
                 const myAvatarUrl = resolveAvatarUrl(me?.avatarUrl);
                 const hasMyAvatar = !!myAvatarUrl;
-                const avatarBusy = avatarUploading || avatarRemoving;
+                const avatarBusyLabel = avatarUploading ? "Enviando..." : avatarRemoving ? "Removendo..." : null;
 
                 return (
                   <>
                     <div className="chat-contactCard">
-                      <div className="chat-avatar chat-avatar--xl">
-                        {hasMyAvatar ? (
-                          <img
-                            src={myAvatarUrl ?? ""}
-                            alt={me?.name ?? "Meu perfil"}
-                            onError={() => markAvatarBroken(me?.avatarUrl)}
-                          />
-                        ) : (
-                          <span>{(me?.name ?? "U").slice(0, 1).toUpperCase()}</span>
-                        )}
-                      </div>
+                      <EditableAvatar
+                        className="chat-avatar chat-avatar--xl"
+                        imageUrl={myAvatarUrl}
+                        fallback={(me?.name ?? "U").slice(0, 1).toUpperCase()}
+                        alt={me?.name ?? "Meu perfil"}
+                        onError={() => markAvatarBroken(me?.avatarUrl)}
+                        onEdit={() => myAvatarInputRef.current?.click()}
+                        onRemove={hasMyAvatar ? () => void removeMyAvatar() : null}
+                        busyLabel={avatarBusyLabel}
+                      />
 
                       <div className="chat-contactCard__name">{me?.name ?? "Usuário"}</div>
                     </div>
@@ -7005,45 +8209,17 @@ export function ChatPage() {
                       <div><strong>Foto de perfil:</strong> {hasMyAvatar ? "Enviada" : "Sem foto"}</div>
                     </div>
 
-                    <div className="chat-myInfoActions">
-                      {hasMyAvatar ? (
-                        <>
-                          <button
-                            className="chat-primaryBtn"
-                            onClick={() => myAvatarInputRef.current?.click()}
-                            disabled={avatarBusy}
-                          >
-                            {avatarUploading ? "Enviando..." : "Alterar foto"}
-                          </button>
-                          <button
-                            className="chat-dangerBtn"
-                            onClick={() => void removeMyAvatar()}
-                            disabled={avatarBusy}
-                          >
-                            {avatarRemoving ? "Removendo..." : "Remover foto"}
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          className="chat-primaryBtn"
-                          onClick={() => myAvatarInputRef.current?.click()}
-                          disabled={avatarBusy}
-                        >
-                          {avatarUploading ? "Enviando..." : "Enviar foto de perfil"}
-                        </button>
-                      )}
-                      <input
-                        ref={myAvatarInputRef}
-                        type="file"
-                        accept="image/*"
-                        style={{ display: "none" }}
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) void uploadMyAvatar(file);
-                          e.currentTarget.value = "";
-                        }}
-                      />
-                    </div>
+                    <input
+                      ref={myAvatarInputRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void uploadMyAvatar(file);
+                        e.currentTarget.value = "";
+                      }}
+                    />
                   </>
                 );
               })()}
@@ -7053,7 +8229,10 @@ export function ChatPage() {
       ) : null}
 
       {pickerOpen ? (
-        <div className="chat-modalBackdrop" onClick={closePicker}>
+        <div
+          className={`chat-modalBackdrop ${conversationDetailsOpen || profileOpen || myInfoOpen ? "chat-modalBackdrop--front" : ""}`.trim()}
+          onClick={closePicker}
+        >
           <div className="chat-modal chat-modal--wide chat-modal--picker" onClick={(e) => e.stopPropagation()}>
             <div className="chat-modal__header">
               <div className="chat-modal__title">
@@ -7072,64 +8251,20 @@ export function ChatPage() {
 
             <div className={`chat-modal__controls ${pickerNeedsTitle ? "chat-modal__controls--stacked" : ""}`}>
               {pickerNeedsTitle ? (
-                <input
-                  className="chat-input"
-                  value={pickerTitle}
-                  onChange={(e) => setPickerTitle(e.target.value)}
-                  placeholder={pickerTitleLabel}
-                  maxLength={80}
-                />
+                <>
+                  <div className="chat-modal__sectionLabel">{pickerTitleSectionLabel}</div>
+                  <input
+                    className="chat-input chat-modal__controlFull"
+                    value={pickerTitle}
+                    onChange={(e) => setPickerTitle(e.target.value)}
+                    placeholder={pickerTitlePlaceholder}
+                    maxLength={80}
+                  />
+                </>
               ) : null}
 
-              {pickerMode === "broadcast" ? (
-                <div className="chat-broadcastRules">
-                  <label className="chat-broadcastRules__allToggle">
-                    <input
-                      type="checkbox"
-                      checked={pickerIncludeAllUsers}
-                      onChange={(e) => setPickerIncludeAllUsers(e.target.checked)}
-                    />
-                    <span>Enviar automaticamente para todos os usuários novos e atuais</span>
-                  </label>
-
-                  <div className="chat-broadcastRules__group">
-                    <div className="chat-broadcastRules__label">Empresas automáticas</div>
-                    <div className="chat-broadcastRules__chips">
-                      {companyRuleOptions.map((item) => {
-                        const selected = pickerSelectedCompanyIds.includes(item.id);
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            className={`chat-broadcastChip ${selected ? "is-selected" : ""}`}
-                            onClick={() => togglePickerCompanySelection(item.id)}
-                          >
-                            {item.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="chat-broadcastRules__group">
-                    <div className="chat-broadcastRules__label">Setores automáticos</div>
-                    <div className="chat-broadcastRules__chips">
-                      {departmentRuleOptions.map((item) => {
-                        const selected = pickerSelectedDepartmentIds.includes(item.id);
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            className={`chat-broadcastChip ${selected ? "is-selected" : ""}`}
-                            onClick={() => togglePickerDepartmentSelection(item.id)}
-                          >
-                            {item.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
+              {pickerNeedsSelection ? (
+                <div className="chat-modal__sectionLabel">{pickerAudienceSectionLabel}</div>
               ) : null}
 
               <input
@@ -7164,6 +8299,87 @@ export function ChatPage() {
                   </option>
                 ))}
               </select>
+
+              {pickerNeedsSelection ? (
+                <div
+                  className={`chat-pickerQuickActions ${
+                    pickerCanUseAutomaticAudience ? "chat-pickerQuickActions--wide" : ""
+                  }`}
+                >
+                  <div className="chat-pickerQuickActions__count">
+                    <span>
+                      {pickerFilteredUserIds.length
+                        ? `${pickerFilteredUserIds.length} resultado(s) nesta pesquisa`
+                        : "Nenhum resultado nesta pesquisa"}
+                    </span>
+                  </div>
+
+                  <div className="chat-pickerQuickActions__count">
+                    <span>
+                      {pickerSelectedUserIds.length}{" "}
+                      {pickerSelectedUserIds.length === 1 ? "contato selecionado" : "contatos selecionados"}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="chat-pickerQuickActions__action"
+                    onClick={toggleSelectAllPickerSearchResults}
+                    disabled={!pickerFilteredUserIds.length || pickerSelectionLockedByAutomaticAudience}
+                    title={
+                      pickerSelectionLockedByAutomaticAudience
+                        ? "A seleção atual já está sendo aplicada automaticamente por essa regra."
+                        : undefined
+                    }
+                  >
+                    {pickerAllFilteredSelected
+                      ? "Desmarcar todos desta pesquisa"
+                      : "Selecionar todos desta pesquisa"}
+                  </button>
+
+                  {pickerCanUseAutomaticAudience ? (
+                    <label className="chat-pickerAutoRule">
+                      <input
+                        type="checkbox"
+                        checked={pickerIncludeAllUsers}
+                        onChange={(e) => handlePickerAutomaticAudienceToggle(e.target.checked)}
+                      />
+                      <span className={`chat-pickerAutoRule__switch ${pickerIncludeAllUsers ? "is-active" : ""}`}>
+                        <span className="chat-pickerAutoRule__thumb" />
+                      </span>
+                      <span className="chat-pickerAutoRule__label">Incluir novos usuários</span>
+                    </label>
+                  ) : null}
+
+                  {pickerUsesPairedAutomaticRules ? (
+                    <button
+                      type="button"
+                      className="chat-pickerRuleManagerBtn chat-pickerRuleManagerBtn--inline"
+                      onClick={openPickerRuleManager}
+                      title="Configurar regras automáticas"
+                    >
+                      <GearIcon />
+                    </button>
+                  ) : null}
+
+                  {pickerCanUseAutomaticAudience ? (
+                    <button
+                      type="button"
+                      ref={pickerGuideTriggerRef}
+                      className={`chat-pickerRuleHintTrigger chat-pickerRuleHintTrigger--${pickerAutomaticAudienceGuide.tone}`}
+                      aria-label={pickerAutomaticAudienceGuide.title}
+                      aria-describedby={pickerGuideOpen ? "picker-auto-guide-tooltip" : undefined}
+                      title={pickerAutomaticAudienceGuide.title}
+                      onMouseEnter={openPickerGuideTooltip}
+                      onMouseLeave={() => closePickerGuideTooltip()}
+                      onFocus={openPickerGuideTooltip}
+                      onBlur={() => closePickerGuideTooltip(0)}
+                    >
+                      <PickerGuideIcon tone={pickerAutomaticAudienceGuide.tone} />
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
 
             <div className="chat-modal__body">
@@ -7172,19 +8388,6 @@ export function ChatPage() {
               ) : (
                 <>
                   {pickerError ? <div className="chat-error">{pickerError}</div> : null}
-                  {pickerNeedsSelection ? (
-                    <div className="chat-pickerSelectionBar">
-                      {pickerSelectedUserIds.length}{" "}
-                      {pickerSelectedUserIds.length === 1 ? "selecionado" : "selecionados"}
-                      {pickerMode === "broadcast" && (
-                        <span className="chat-pickerSelectionBar__detail">
-                          {pickerIncludeAllUsers ? " • todos os usuários" : ""}
-                          {pickerSelectedCompanyIds.length ? ` • ${pickerSelectedCompanyIds.length} empresa(s)` : ""}
-                          {pickerSelectedDepartmentIds.length ? ` • ${pickerSelectedDepartmentIds.length} setor(es)` : ""}
-                        </span>
-                      )}
-                    </div>
-                  ) : null}
                   {pickerGroupedUsers.length === 0 ? (
                     <div className="chat-empty">
                       {pickerMode === "group-members"
@@ -7202,17 +8405,29 @@ export function ChatPage() {
                             <div className="chat-userGroup__list">
                               {dept.users.map((user) => {
                                 const selected = pickerSelectedUserSet.has(user.id);
+                                const lockedByAutomaticAudience =
+                                  pickerSelectionLockedByAutomaticAudience &&
+                                  pickerAutomaticAudienceScopeUserSet.has(user.id);
                                 return (
                                   <div
                                     key={user.id}
-                                    className={`chat-userRow ${selected ? "is-selected" : ""}`}
+                                    className={`chat-userRow ${selected ? "is-selected" : ""} ${
+                                      lockedByAutomaticAudience ? "is-locked" : ""
+                                    }`}
                                     role="button"
-                                    tabIndex={0}
+                                    aria-disabled={lockedByAutomaticAudience}
+                                    tabIndex={lockedByAutomaticAudience ? -1 : 0}
+                                    title={
+                                      lockedByAutomaticAudience
+                                        ? "Esse usuário está incluído automaticamente pela regra ativa."
+                                        : undefined
+                                    }
                                     onClick={() => {
                                       if (pickerMode === "direct") {
                                         void startDirect(user.id);
                                         return;
                                       }
+                                      if (lockedByAutomaticAudience) return;
                                       togglePickerUserSelection(user.id);
                                     }}
                                     onKeyDown={(e) => {
@@ -7222,11 +8437,22 @@ export function ChatPage() {
                                           void startDirect(user.id);
                                           return;
                                         }
+                                        if (lockedByAutomaticAudience) return;
                                         togglePickerUserSelection(user.id);
                                       }
                                     }}
                                   >
                                     <div className="chat-userCell chat-userCell--name">
+                                      {pickerNeedsSelection ? (
+                                        <span
+                                          className={`chat-userRow__checkbox ${selected ? "is-selected" : ""} ${
+                                            lockedByAutomaticAudience ? "is-locked" : ""
+                                          }`}
+                                          aria-hidden="true"
+                                        >
+                                          {selected ? <CheckSquareIcon /> : null}
+                                        </span>
+                                      ) : null}
                                       <div className="chat-avatar chat-avatar--sm">
                                         {resolveAvatarUrl(user.avatarUrl) ? (
                                           <img
@@ -7266,11 +8492,6 @@ export function ChatPage() {
                                     <div className="chat-userCell chat-userCell--ext">
                                       <span className="chat-userFieldLabel">Ramal:</span>
                                       <span className="chat-userExtText">{user.extension || "Sem ramal"}</span>
-                                      {pickerNeedsSelection ? (
-                                        <span className={`chat-userPickBadge ${selected ? "is-selected" : ""}`}>
-                                          {selected ? "Selecionado" : "Selecionar"}
-                                        </span>
-                                      ) : null}
                                     </div>
                                   </div>
                                 );
@@ -7293,10 +8514,110 @@ export function ChatPage() {
                 <button
                   className="chat-primaryBtn"
                   onClick={() => void submitPicker()}
-                  disabled={pickerSubmitting || (pickerMode === "broadcast" ? !pickerBroadcastHasAudience : !pickerSelectedUserIds.length)}
+                  disabled={
+                    pickerSubmitting ||
+                    (pickerMode === "group" || pickerMode === "broadcast" || pickerMode === "group-members"
+                      ? !pickerHasAudience
+                      : !pickerSelectedUserIds.length)
+                  }
                 >
                   {pickerSubmitting ? "Salvando..." : pickerPrimaryLabel}
                 </button>
+              </div>
+            ) : null}
+
+            {pickerRuleManagerOpen && pickerUsesPairedAutomaticRules ? (
+              <div className="chat-pickerRuleModalBackdrop" onClick={() => setPickerRuleManagerOpen(false)}>
+                <div className="chat-pickerRuleModal" onClick={(e) => e.stopPropagation()}>
+                  <div className="chat-pickerRuleModal__header">
+                    <div className="chat-pickerRuleModal__title">Regras automáticas</div>
+                    <button className="chat-iconBtn" onClick={() => setPickerRuleManagerOpen(false)}>
+                      <CloseIcon />
+                    </button>
+                  </div>
+
+                  <div className="chat-pickerRuleModal__body">
+                    <div className="chat-pickerRuleModal__intro">
+                      Cada regra combina <strong>empresa + setor</strong>. Quem for criado depois com essa combinação
+                      entra automaticamente no grupo.
+                    </div>
+
+                    <div className="chat-pickerRuleRows">
+                      {pickerAutomaticRules.length ? (
+                        pickerAutomaticRules.map((rule, index) => (
+                          <div key={rule.id} className="chat-pickerRuleRow">
+                            <span className="chat-pickerRuleRow__index">{index + 1}</span>
+                            <select
+                              className="chat-select"
+                              value={rule.companyId ?? ""}
+                              onChange={(e) => {
+                                const nextCompanyId = e.target.value || null;
+                                updatePickerAutomaticRule(rule.id, {
+                                  companyId: nextCompanyId,
+                                  company: nextCompanyId
+                                    ? companyRuleOptions.find((item) => item.id === nextCompanyId) ?? null
+                                    : null,
+                                });
+                              }}
+                            >
+                              <option value="">Todas as empresas</option>
+                              {companyRuleOptions.map((item) => (
+                                <option key={item.id} value={item.id}>
+                                  {item.name}
+                                </option>
+                              ))}
+                            </select>
+
+                            <select
+                              className="chat-select"
+                              value={rule.departmentId ?? ""}
+                              onChange={(e) => {
+                                const nextDepartmentId = e.target.value || null;
+                                updatePickerAutomaticRule(rule.id, {
+                                  departmentId: nextDepartmentId,
+                                  department: nextDepartmentId
+                                    ? departmentRuleOptions.find((item) => item.id === nextDepartmentId) ?? null
+                                    : null,
+                                });
+                              }}
+                            >
+                              <option value="">Todos os setores</option>
+                              {departmentRuleOptions.map((item) => (
+                                <option key={item.id} value={item.id}>
+                                  {item.name}
+                                </option>
+                              ))}
+                            </select>
+
+                            <button
+                              type="button"
+                              className="chat-pickerRuleRow__remove"
+                              onClick={() => removePickerAutomaticRule(rule.id)}
+                              title="Remover regra"
+                            >
+                              <TrashIcon />
+                            </button>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="chat-note">
+                          Nenhuma regra salva ainda. Use o <strong>+</strong> ao lado do setor ou adicione uma linha
+                          agora.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="chat-pickerRuleModal__footer">
+                    <button type="button" className="chat-confirmModal__btn" onClick={addEmptyPickerRule}>
+                      <PlusIcon />
+                      <span>Adicionar regra</span>
+                    </button>
+                    <button type="button" className="chat-primaryBtn" onClick={() => setPickerRuleManagerOpen(false)}>
+                      Concluir
+                    </button>
+                  </div>
+                </div>
               </div>
             ) : null}
           </div>
@@ -7768,7 +9089,7 @@ export function ChatPage() {
           <div className="chat-profileDrawer" onClick={(e) => e.stopPropagation()}>
             <div className="chat-profileDrawer__header">
               <div className="chat-profileDrawer__title">
-                {conversationKind(conversationDetails ?? activeConv) === "BROADCAST" ? "Dados da lista" : "Dados do grupo"}
+                {conversationDetailsKind === "BROADCAST" ? "Dados da lista" : "Dados do grupo"}
               </div>
               <button className="chat-iconBtn" onClick={() => setConversationDetailsOpen(false)}>
                 <CloseIcon />
@@ -7781,20 +9102,36 @@ export function ChatPage() {
               </div>
             ) : conversationDetails ? (
               <div className="chat-profileDrawer__body">
-                <div className="chat-contactCard">
-                  <div className="chat-avatar chat-avatar--xl">
-                    {resolveAvatarUrl(conversationAvatarUrl(conversationDetails)) ? (
-                      <img
-                        src={resolveAvatarUrl(conversationAvatarUrl(conversationDetails)) ?? ""}
-                        alt={conversationDisplayName(conversationDetails)}
-                        onError={() => markAvatarBroken(conversationAvatarUrl(conversationDetails))}
-                      />
-                    ) : (
-                      <span>{conversationAvatarFallback(conversationDetails)}</span>
-                    )}
-                  </div>
+                {(() => {
+                  const detailsAvatarUrl = resolveAvatarUrl(conversationAvatarUrl(conversationDetails));
+                  const detailsAvatarBusyLabel = conversationAvatarUploading
+                    ? "Enviando..."
+                    : conversationAvatarRemoving
+                    ? "Removendo..."
+                    : null;
 
-                  {conversationKind(conversationDetails) === "BROADCAST" && !conversationDetailsLegacyMode ? (
+                  return (
+                <div className="chat-contactCard">
+                  <EditableAvatar
+                    className="chat-avatar chat-avatar--xl"
+                    imageUrl={detailsAvatarUrl}
+                    fallback={conversationAvatarFallback(conversationDetails)}
+                    alt={conversationDisplayName(conversationDetails)}
+                    onError={() => markAvatarBroken(conversationAvatarUrl(conversationDetails))}
+                    onEdit={
+                      conversationDetailsCanManageAvatar
+                        ? () => conversationAvatarInputRef.current?.click()
+                        : undefined
+                    }
+                    onRemove={
+                      conversationDetailsCanManageAvatar && detailsAvatarUrl
+                        ? () => void removeConversationAvatar()
+                        : null
+                    }
+                    busyLabel={conversationDetailsCanManageAvatar ? detailsAvatarBusyLabel : null}
+                  />
+
+                  {conversationDetailsKind === "BROADCAST" && conversationDetailsCanEditBroadcast ? (
                     <input
                       className="chat-input chat-input--detailsTitle"
                       value={conversationDetailsTitle}
@@ -7807,6 +9144,8 @@ export function ChatPage() {
 
                   <div className="chat-contactCard__sub">{conversationSummaryLine(conversationDetails)}</div>
                 </div>
+                  );
+                })()}
 
                 {conversationDetailsError ? <div className="chat-error">{conversationDetailsError}</div> : null}
                 {conversationDetailsLegacyMode ? (
@@ -7816,26 +9155,8 @@ export function ChatPage() {
                   </div>
                 ) : null}
 
-                {!conversationDetailsLegacyMode ? (
-                  <div className="chat-detailsActions">
-                    <button
-                      className="chat-primaryBtn"
-                      onClick={() => conversationAvatarInputRef.current?.click()}
-                      disabled={conversationAvatarUploading || conversationAvatarRemoving}
-                    >
-                      {conversationAvatarUploading ? "Enviando..." : "Alterar foto"}
-                    </button>
-                    <button
-                      className="chat-dangerBtn"
-                      onClick={() => void removeConversationAvatar()}
-                      disabled={
-                        conversationAvatarUploading ||
-                        conversationAvatarRemoving ||
-                        !conversationAvatarUrl(conversationDetails)
-                      }
-                    >
-                      {conversationAvatarRemoving ? "Removendo..." : "Remover foto"}
-                    </button>
+                {conversationDetailsCanManageAvatar ? (
+                  <>
                     <input
                       ref={conversationAvatarInputRef}
                       type="file"
@@ -7847,52 +9168,139 @@ export function ChatPage() {
                         e.currentTarget.value = "";
                       }}
                     />
-                  </div>
+                  </>
                 ) : null}
 
-                {conversationKind(conversationDetails) === "GROUP" ? (
+                {conversationDetailsKind === "GROUP" ? (
                   <>
+                    {conversationDetails.isCurrentParticipant !== false ? (
+                      <div className="chat-groupHeroActions">
+                        <button
+                          className="chat-groupHeroAction"
+                          onClick={() => openCreatePicker("group-members", conversationDetails)}
+                          disabled={!conversationDetailsCanManageGroup}
+                          title={
+                            conversationDetailsCanManageGroup
+                              ? "Adicionar pessoas"
+                              : "Somente administradores podem adicionar pessoas"
+                          }
+                        >
+                          <span className="chat-groupHeroAction__icon">
+                            <UserAddIcon />
+                          </span>
+                          <span className="chat-groupHeroAction__label">Adicionar</span>
+                        </button>
+                        <button
+                          className="chat-groupHeroAction"
+                          onClick={() => void leaveGroup(conversationDetails)}
+                        >
+                          <span className="chat-groupHeroAction__icon">
+                            <LogOutIcon />
+                          </span>
+                          <span className="chat-groupHeroAction__label">Sair do grupo</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="chat-groupInactiveNotice">{inactiveGroupNotice(conversationDetails)}</div>
+                    )}
+
                     <div className="chat-sectionTitle">Participantes</div>
-                    <div className="chat-detailsList">
-                      {conversationParticipants(conversationDetails).map((user) => (
-                        <div key={user.id} className="chat-detailsList__row">
-                          <div className="chat-detailsList__main">
-                            <strong>{user.name}</strong>
-                            <span>{user.email || user.username}</span>
-                          </div>
-                        </div>
-                      ))}
+                    <div className="chat-groupParticipantsList">
+                      {conversationDetailsParticipants.length ? (
+                        conversationDetailsParticipants.map((user) => {
+                          const isAdmin = !!user.isGroupAdmin;
+                          const isSelf = user.id === me?.id;
+                          const promoteKey = `${user.id}:promote`;
+                          const demoteKey = `${user.id}:demote`;
+                          const removeKey = `${user.id}:remove`;
+                          const userAvatarUrl = resolveAvatarUrl(user.avatarUrl);
+                          const isBusy =
+                            groupDetailsActionKey === promoteKey ||
+                            groupDetailsActionKey === demoteKey ||
+                            groupDetailsActionKey === removeKey;
+                          return (
+                            <div key={user.id} className="chat-groupParticipantRow">
+                              <div className="chat-avatar chat-avatar--md chat-groupParticipantRow__avatar">
+                                {userAvatarUrl ? (
+                                  <img
+                                    src={userAvatarUrl}
+                                    alt={user.name}
+                                    onError={() => markAvatarBroken(user.avatarUrl)}
+                                  />
+                                ) : (
+                                  <span>{(user.name || user.username || "U").slice(0, 1).toUpperCase()}</span>
+                                )}
+                              </div>
+
+                              <div className="chat-groupParticipantRow__main">
+                                <div className="chat-groupParticipantRow__name">{isSelf ? "Você" : user.name}</div>
+                                <div className="chat-groupParticipantRow__sub">{user.email || user.username}</div>
+                              </div>
+
+                              <div className="chat-groupParticipantRow__side">
+                                {isAdmin ? <span className="chat-roleBadge chat-roleBadge--tail">Admin</span> : null}
+                                {conversationDetailsCanManageGroup && !isSelf ? (
+                                  <button
+                                    className={`chat-groupParticipantMenuBtn ${groupMemberMenuUserId === user.id ? "is-open" : ""}`}
+                                    data-group-member-menu-trigger={user.id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      groupMemberMenuTriggerRef.current = e.currentTarget;
+                                      setGroupMemberMenuPosition(null);
+                                      setGroupMemberMenuUserId((prev) => {
+                                        const next = prev === user.id ? null : user.id;
+                                        if (!next) groupMemberMenuTriggerRef.current = null;
+                                        return next;
+                                      });
+                                    }}
+                                    disabled={isBusy}
+                                    title="Ações do participante"
+                                  >
+                                    <DotsIcon />
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="chat-empty">Grupo sem participantes ativos no momento.</div>
+                      )}
                     </div>
 
-                    <div className="chat-detailsActions">
-                      {conversationDetails.isCurrentParticipant !== false ? (
-                        <>
-                          <button
-                            className="chat-primaryBtn"
-                            onClick={() => openCreatePicker("group-members", conversationDetails)}
-                          >
-                            Adicionar pessoas
-                          </button>
-                          <button
-                            className="chat-dangerBtn"
-                            onClick={() => void leaveGroup(conversationDetails)}
-                          >
-                            Sair do grupo
-                          </button>
-                        </>
-                      ) : (
+                    <div className="chat-groupSettingsList">
+                      <button
+                        className="chat-groupSettingsAction"
+                        onClick={() => void clearConversation(conversationDetails.id, conversationDisplayName(conversationDetails))}
+                      >
+                        <ClearConversationIcon />
+                        <span>Limpar conversa</span>
+                      </button>
+                      {conversationDetailsCanManageGroup && conversationDetails.isCurrentParticipant !== false ? (
                         <button
-                          className="chat-dangerBtn"
-                          onClick={() => void removeConversationFromList(conversationDetails.id)}
+                          className="chat-groupSettingsAction is-danger"
+                          onClick={() => void deleteGroupFromDetails(conversationDetails)}
+                          disabled={groupDetailsActionKey === `delete:${conversationDetails.id}`}
                         >
-                          Remover dos chats
+                          <TrashIcon />
+                          <span>{groupDetailsActionKey === `delete:${conversationDetails.id}` ? "Excluindo grupo..." : "Excluir grupo"}</span>
                         </button>
-                      )}
+                      ) : null}
+                      {conversationDetails.isCurrentParticipant === false ? (
+                        <button
+                          className="chat-groupSettingsAction is-danger"
+                          onClick={() => removeConversationFromDetailsDrawer(conversationDetails)}
+                          disabled={conversationDetailsRemovingChat}
+                        >
+                          <CloseIcon />
+                          <span>{conversationDetailsRemovingChat ? "Removendo dos chats..." : "Remover dos chats"}</span>
+                        </button>
+                      ) : null}
                     </div>
                   </>
                 ) : (
                   <>
-                    {!conversationDetailsLegacyMode ? (
+                    {conversationDetailsCanEditBroadcast && !conversationDetailsLegacyMode ? (
                       <>
                         <div className="chat-sectionTitle">Regras automáticas da lista</div>
                         <div className="chat-broadcastRules chat-broadcastRules--drawer">
@@ -7952,7 +9360,7 @@ export function ChatPage() {
                             <strong>{user.name}</strong>
                             <span>{user.email || user.username}</span>
                           </div>
-                          {!conversationDetailsLegacyMode ? (
+                          {conversationDetailsCanEditBroadcast && !conversationDetailsLegacyMode ? (
                             <button
                               className="chat-iconBtn chat-iconBtn--sm is-danger"
                               onClick={() => removeUserFromConversationDetails(user.id)}
@@ -7968,7 +9376,7 @@ export function ChatPage() {
                       ) : null}
                     </div>
 
-                    {!conversationDetailsLegacyMode ? (
+                    {conversationDetailsCanEditBroadcast && !conversationDetailsLegacyMode ? (
                       <>
                         <div className="chat-sectionTitle">Quem está fora da lista</div>
                         <div className="chat-detailsList">

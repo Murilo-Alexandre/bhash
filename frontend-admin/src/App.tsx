@@ -28,6 +28,16 @@ function MenuIcon() {
   );
 }
 
+function LogOutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+      <path d="m16 17 5-5-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M21 12H9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function App() {
   const { isAuthenticated, logout, logoff, api } = useAdminAuth();
   const { theme, toggle, logoUrl } = useTheme();
@@ -102,8 +112,8 @@ export default function App() {
         onToggleTheme={toggle}
         logoSrc={logoUrl}
         rightSlot={
-          <button onClick={logoff} className="admin-logoutBtn">
-            Sair
+          <button onClick={logoff} className="admin-logoutBtn" title="Sair" aria-label="Sair">
+            <LogOutIcon />
           </button>
         }
       />
@@ -213,7 +223,7 @@ export default function App() {
               </button>
 
               <button onClick={logoff} className="admin-logoutBtn">
-                Sair
+                <LogOutIcon />
               </button>
             </div>
           )

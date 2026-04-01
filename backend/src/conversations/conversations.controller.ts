@@ -50,13 +50,17 @@ export class ConversationsController {
   @Post('group')
   async createGroup(
     @Req() req: any,
-    @Body() body: { title?: string; memberIds?: string[] },
+    @Body()
+    body: {
+      title?: string;
+      memberIds?: string[];
+      automaticRules?: Array<{ companyId?: string | null; departmentId?: string | null }>;
+      companyIds?: string[];
+      departmentIds?: string[];
+      includeAllUsers?: boolean;
+    },
   ) {
-    const result = await this.conversations.createGroup(
-      req.user.sub,
-      body?.title ?? '',
-      body?.memberIds ?? [],
-    );
+    const result = await this.conversations.createGroup(req.user.sub, body ?? {});
     for (const participantId of result.participantIds ?? []) {
       this.events.emitConversationsSync(participantId, {
         conversationId: result.conversation.id,
@@ -73,6 +77,7 @@ export class ConversationsController {
     body: {
       title?: string;
       targetUserIds?: string[];
+      automaticRules?: Array<{ companyId?: string | null; departmentId?: string | null }>;
       companyIds?: string[];
       departmentIds?: string[];
       excludedUserIds?: string[];
@@ -95,6 +100,7 @@ export class ConversationsController {
     body: {
       title?: string;
       targetUserIds?: string[];
+      automaticRules?: Array<{ companyId?: string | null; departmentId?: string | null }>;
       companyIds?: string[];
       departmentIds?: string[];
       excludedUserIds?: string[];
@@ -145,7 +151,13 @@ export class ConversationsController {
     }
     await deleteConversationAvatarVariantsByBase(base, file.filename);
 
-    const result = await this.conversations.setConversationAvatar(req.user.sub, conversationId, avatarUrl);
+    let result: any;
+    try {
+      result = await this.conversations.setConversationAvatar(req.user.sub, conversationId, avatarUrl);
+    } catch (error) {
+      await deleteConversationAvatarFileSafe(newAvatarPath);
+      throw error;
+    }
     for (const participantId of (current.participants ?? []).map((item: any) => item.userId ?? item.user?.id).filter(Boolean)) {
       this.events.emitConversationsSync(participantId, { conversationId, force: true });
     }
@@ -157,12 +169,11 @@ export class ConversationsController {
   @Delete(':id/avatar')
   async removeAvatar(@Req() req: any, @Param('id') conversationId: string) {
     const current = await this.conversations.assertCurrentParticipant(req.user.sub, conversationId);
+    const result = await this.conversations.setConversationAvatar(req.user.sub, conversationId, null);
     await deleteConversationAvatarFileSafe(safeConversationAvatarPathFromUrl(current.avatarUrl));
     await deleteConversationAvatarVariantsByBase(
       conversationAvatarFileBase(conversationId, 'conversation'),
     );
-
-    const result = await this.conversations.setConversationAvatar(req.user.sub, conversationId, null);
     for (const participantId of (current.participants ?? []).map((item: any) => item.userId ?? item.user?.id).filter(Boolean)) {
       this.events.emitConversationsSync(participantId, { conversationId, force: true });
     }
@@ -175,18 +186,57 @@ export class ConversationsController {
   async addParticipants(
     @Req() req: any,
     @Param('id') conversationId: string,
-    @Body() body: { userIds?: string[] },
+    @Body()
+    body: {
+      userIds?: string[];
+      automaticRules?: Array<{ companyId?: string | null; departmentId?: string | null }>;
+      companyIds?: string[];
+      departmentIds?: string[];
+      includeAllUsers?: boolean;
+    },
   ) {
     const result = await this.conversations.addGroupParticipants(
       req.user.sub,
       conversationId,
-      body?.userIds ?? [],
+      body ?? {},
     );
     for (const participantId of result.participantIds ?? []) {
       this.events.emitConversationsSync(participantId, {
         conversationId,
         force: true,
       });
+    }
+    return result;
+  }
+
+  @Patch(':id/participants/:userId/admin')
+  async setGroupAdmin(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+    @Param('userId') targetUserId: string,
+    @Body() body: { value?: boolean },
+  ) {
+    const result = await this.conversations.setGroupAdmin(
+      req.user.sub,
+      conversationId,
+      targetUserId,
+      !!body?.value,
+    );
+    for (const participantId of result.participantIds ?? []) {
+      this.events.emitConversationsSync(participantId, { conversationId, force: true });
+    }
+    return result;
+  }
+
+  @Delete(':id/participants/:userId')
+  async removeParticipant(
+    @Req() req: any,
+    @Param('id') conversationId: string,
+    @Param('userId') targetUserId: string,
+  ) {
+    const result = await this.conversations.removeGroupParticipant(req.user.sub, conversationId, targetUserId);
+    for (const participantId of new Set([...(result.participantIds ?? []), result.removedUserId].filter(Boolean))) {
+      this.events.emitConversationsSync(String(participantId), { conversationId, force: true });
     }
     return result;
   }
@@ -200,6 +250,15 @@ export class ConversationsController {
         conversationId,
         force: true,
       });
+    }
+    return result;
+  }
+
+  @Delete(':id/group')
+  async deleteGroup(@Req() req: any, @Param('id') conversationId: string) {
+    const result = await this.conversations.deleteGroup(req.user.sub, conversationId);
+    for (const participantId of result.participantIds ?? []) {
+      this.events.emitConversationsSync(participantId, { conversationId, force: true });
     }
     return result;
   }

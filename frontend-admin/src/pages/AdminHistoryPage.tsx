@@ -44,10 +44,18 @@ type Contact = {
   department?: { id: string; name: string } | null;
 };
 
+type ConversationKind = "DIRECT" | "GROUP";
+type GroupStatus = "active" | "excluded";
+
 type ConversationItem = {
   id: string;
+  kind?: ConversationKind;
   updatedAt: string;
-  otherUser: { id: string; username: string; name: string; avatarUrl?: string | null };
+  title?: string;
+  avatarUrl?: string | null;
+  participantCount?: number;
+  status?: GroupStatus;
+  otherUser?: { id: string; username: string; name: string; avatarUrl?: string | null } | null;
   lastMessage:
     | {
         id: string;
@@ -56,6 +64,13 @@ type ConversationItem = {
         senderId: string;
       }
     | null;
+};
+
+type UserConversationsResponse = {
+  ok: boolean;
+  items: ConversationItem[];
+  activeGroups?: ConversationItem[];
+  excludedGroups?: ConversationItem[];
 };
 
 type ReplyToMessage = {
@@ -279,6 +294,43 @@ function contactAvatarUrl(raw?: string | null) {
   return toAbsoluteUrl(raw);
 }
 
+function adminConversationKind(conv?: ConversationItem | null): ConversationKind {
+  return conv?.kind === "GROUP" ? "GROUP" : "DIRECT";
+}
+
+function adminConversationTitle(conv?: ConversationItem | null) {
+  if (!conv) return "Conversa";
+  if (adminConversationKind(conv) === "GROUP") {
+    return conv.title?.trim() || "Grupo";
+  }
+  return conv.otherUser?.name ?? "Contato";
+}
+
+function adminConversationAvatar(conv?: ConversationItem | null) {
+  if (!conv) return null;
+  return adminConversationKind(conv) === "GROUP"
+    ? contactAvatarUrl(conv.avatarUrl)
+    : contactAvatarUrl(conv.otherUser?.avatarUrl);
+}
+
+function adminConversationFallback(conv?: ConversationItem | null) {
+  const label =
+    adminConversationKind(conv) === "GROUP"
+      ? conv?.title ?? "Grupo"
+      : conv?.otherUser?.name ?? conv?.otherUser?.username ?? "Contato";
+  return label.trim().slice(0, 1).toUpperCase() || "C";
+}
+
+function adminConversationMeta(conv?: ConversationItem | null) {
+  if (!conv) return "";
+  if (adminConversationKind(conv) === "GROUP") {
+    const count = Math.max(0, Number(conv.participantCount ?? 0));
+    const countLabel = count === 1 ? "1 participante" : `${count} participantes`;
+    return conv.status === "excluded" ? `Excluído • ${countLabel}` : countLabel;
+  }
+  return conv.otherUser?.username ? `@${conv.otherUser.username}` : "";
+}
+
 function formatBytes(bytes?: number | null) {
   if (!bytes || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -452,6 +504,8 @@ export function AdminHistoryPage() {
   // ====== CONVERSAS DO USUÁRIO ======
   const [selectedUser, setSelectedUser] = useState<Contact | null>(null);
   const [userConvs, setUserConvs] = useState<ConversationItem[]>([]);
+  const [activeUserGroups, setActiveUserGroups] = useState<ConversationItem[]>([]);
+  const [excludedUserGroups, setExcludedUserGroups] = useState<ConversationItem[]>([]);
   const [userConvsLoading, setUserConvsLoading] = useState(false);
   const [userConvsMsg, setUserConvsMsg] = useState<string | null>(null);
 
@@ -811,15 +865,19 @@ export function AdminHistoryPage() {
       setUserConvsMsg(null);
     }
     try {
-      const res = await api.get<{ ok: boolean; items: ConversationItem[] }>(
+      const res = await api.get<UserConversationsResponse>(
         `/admin/history/users/${userId}/conversations`
       );
       setUserConvs(res.data.items ?? []);
+      setActiveUserGroups(res.data.activeGroups ?? []);
+      setExcludedUserGroups(res.data.excludedGroups ?? []);
     } catch (e: any) {
       if (e?.response?.status === 401) return logout();
       if (!silent) {
         setUserConvsMsg(e?.response?.data?.message ?? "Falha ao carregar conversas");
         setUserConvs([]);
+        setActiveUserGroups([]);
+        setExcludedUserGroups([]);
       }
     } finally {
       if (!silent) {
@@ -1707,12 +1765,53 @@ export function AdminHistoryPage() {
     if (mode === "userConversations")
       return selectedUser ? `Históricos • chats de ${selectedUser.name}` : "Históricos • chats do usuário";
     if (mode === "conversation") {
-      const u = selectedConv?.otherUser?.name ? (selectedUser?.name ?? "Usuário") : "Usuário";
-      const other = selectedConv?.otherUser?.name ?? "Contato";
-      return `Históricos • ${u} ↔ ${other}`;
+      const userLabel = selectedUser?.name ?? "Usuário";
+      const conversationLabel = adminConversationTitle(selectedConv);
+      return adminConversationKind(selectedConv) === "GROUP"
+        ? `Históricos • ${userLabel} • grupo ${conversationLabel}`
+        : `Históricos • ${userLabel} ↔ ${conversationLabel}`;
     }
     return "Históricos";
   }, [mode, selectedUser, selectedConv]);
+
+  function renderUserConversationRow(conv: ConversationItem) {
+    const kind = adminConversationKind(conv);
+    const avatar = adminConversationAvatar(conv);
+    const brokenKey = kind === "GROUP" ? `group:${conv.id}` : conv.otherUser?.id ?? conv.id;
+    const showAvatar = !!avatar && !brokenAvatarIds.has(brokenKey);
+    const previewText = conv.lastMessage?.bodyPreview || "Sem mensagens ainda";
+    const previewDate = conv.lastMessage?.createdAt ?? conv.updatedAt;
+    const meta = adminConversationMeta(conv);
+
+    return (
+      <button
+        key={conv.id}
+        onClick={() => openConversation(conv)}
+        className={`admin-historyUserChatRow ${isMobileLayout ? "admin-historyUserChatRow--mobile" : ""}`}
+      >
+        <div className="admin-historyUserChatRow__avatar">
+          {showAvatar ? (
+            <img
+              src={avatar ?? ""}
+              alt={adminConversationTitle(conv)}
+              onError={() => markAvatarBroken(brokenKey)}
+            />
+          ) : (
+            adminConversationFallback(conv)
+          )}
+        </div>
+
+        <div className="admin-historyUserChatRow__identity">
+          <div className="admin-historyUserChatRow__name">{adminConversationTitle(conv)}</div>
+          <div className="admin-historyUserChatRow__username">{meta}</div>
+        </div>
+
+        <div className="admin-historyUserChatRow__preview">{previewText}</div>
+
+        <div className="admin-historyUserChatRow__time">{fmt(previewDate)}</div>
+      </button>
+    );
+  }
 
   const groupedMessages = useMemo(() => {
     const out: Array<{ kind: "sep"; label: string } | { kind: "msg"; m: Message }> = [];
@@ -2256,6 +2355,8 @@ export function AdminHistoryPage() {
                     setMode("contacts");
                     setSelectedUser(null);
                     setUserConvs([]);
+                    setActiveUserGroups([]);
+                    setExcludedUserGroups([]);
                   }}
                   style={ghostBtn(false)}
                 >
@@ -2269,49 +2370,37 @@ export function AdminHistoryPage() {
             <div className="admin-historyConvsList">
               {userConvsLoading ? (
                 <div className="admin-historyEmpty">Carregando…</div>
-              ) : userConvs.length === 0 ? (
+              ) : userConvs.length === 0 && activeUserGroups.length === 0 && excludedUserGroups.length === 0 ? (
                 <div className="admin-historyEmpty">Nenhuma conversa encontrada.</div>
               ) : (
-                userConvs.map((c) => (
-                  (() => {
-                    const avatar = contactAvatarUrl(c.otherUser.avatarUrl);
-                    const showAvatar = !!avatar && !brokenAvatarIds.has(c.otherUser.id);
-                    const fallback = (c.otherUser.name || c.otherUser.username).slice(0, 1).toUpperCase();
-                    const previewText = c.lastMessage?.bodyPreview || "Sem mensagens ainda";
-                    const previewDate = c.lastMessage?.createdAt ?? c.updatedAt;
+                <>
+                  {userConvs.length ? (
+                    <div className="admin-historyConvsSection">
+                      <div className="admin-historyConvsSection__title">Chats diretos</div>
+                      <div className="admin-historyConvsSection__list">
+                        {userConvs.map((c) => renderUserConversationRow(c))}
+                      </div>
+                    </div>
+                  ) : null}
 
-                    return (
-                      <button
-                        key={c.id}
-                        onClick={() => openConversation(c)}
-                        className={`admin-historyUserChatRow ${isMobileLayout ? "admin-historyUserChatRow--mobile" : ""}`}
-                      >
-                        <div className="admin-historyUserChatRow__avatar">
-                          {showAvatar ? (
-                            <img
-                              src={avatar ?? ""}
-                              alt={c.otherUser.name}
-                              onError={() => markAvatarBroken(c.otherUser.id)}
-                            />
-                          ) : (
-                            fallback
-                          )}
-                        </div>
+                  {activeUserGroups.length ? (
+                    <div className="admin-historyConvsSection">
+                      <div className="admin-historyConvsSection__title">Grupos ativos</div>
+                      <div className="admin-historyConvsSection__list">
+                        {activeUserGroups.map((c) => renderUserConversationRow(c))}
+                      </div>
+                    </div>
+                  ) : null}
 
-                        <div className="admin-historyUserChatRow__identity">
-                          <div className="admin-historyUserChatRow__name">{c.otherUser.name}</div>
-                          <div className="admin-historyUserChatRow__username">@{c.otherUser.username}</div>
-                        </div>
-
-                        <div className="admin-historyUserChatRow__preview">
-                          {previewText}
-                        </div>
-
-                        <div className="admin-historyUserChatRow__time">{fmt(previewDate)}</div>
-                      </button>
-                    );
-                  })()
-                ))
+                  {excludedUserGroups.length ? (
+                    <div className="admin-historyConvsSection">
+                      <div className="admin-historyConvsSection__title">Grupos excluídos</div>
+                      <div className="admin-historyConvsSection__list">
+                        {excludedUserGroups.map((c) => renderUserConversationRow(c))}
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               )}
             </div>
           </Card>
@@ -2336,7 +2425,9 @@ export function AdminHistoryPage() {
                 onClick={() => openConversationDetails("image")}
                 title="Abrir dados e anexos da conversa"
               >
-                {selectedUser?.name ?? "Usuário"} ↔ {selectedConv?.otherUser?.name ?? "Contato"}
+                {adminConversationKind(selectedConv) === "GROUP"
+                  ? `${selectedUser?.name ?? "Usuário"} • ${adminConversationTitle(selectedConv)}`
+                  : `${selectedUser?.name ?? "Usuário"} ↔ ${adminConversationTitle(selectedConv)}`}
               </button>
               <button onClick={backToUserConversations} style={ghostBtn(false)}>
                 ← Voltar
@@ -2499,7 +2590,7 @@ export function AdminHistoryPage() {
 
                           {m.broadcastSource ? (
                             <div className="chat-broadcastOrigin">
-                              Enviada pela lista de transmissão: <strong>{m.broadcastSource.title}</strong>
+                              Mensagem enviada pela lista de transmissão: <strong>{m.broadcastSource.title}</strong>
                             </div>
                           ) : null}
 
@@ -2763,8 +2854,10 @@ export function AdminHistoryPage() {
                 <strong>{selectedUser?.name ?? "Usuário"}</strong>
               </div>
               <div className="admin-historyMediaLibrary__summaryChip">
-                <span className="admin-historyMediaLibrary__summaryLabel">Contato</span>
-                <strong>{selectedConv?.otherUser?.name ?? "Contato"}</strong>
+                <span className="admin-historyMediaLibrary__summaryLabel">
+                  {adminConversationKind(selectedConv) === "GROUP" ? "Grupo" : "Contato"}
+                </span>
+                <strong>{adminConversationTitle(selectedConv)}</strong>
               </div>
               <div className="admin-historyMediaLibrary__tabGroup" role="tablist" aria-label="Filtro de anexos">
                 <button
@@ -3196,10 +3289,11 @@ function ImageIcon() {
 function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
-      <path d="M4 7h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M9 4h6a1 1 0 0 1 1 1v2H8V5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M10 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

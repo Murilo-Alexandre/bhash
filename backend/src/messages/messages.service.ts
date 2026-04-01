@@ -335,6 +335,12 @@ export class MessagesService {
         participants: {
           select: { userId: true },
         },
+        automaticRules: {
+          select: {
+            companyId: true,
+            departmentId: true,
+          },
+        },
         broadcastTargets: {
           select: { userId: true },
         },
@@ -489,6 +495,7 @@ export class MessagesService {
   private async resolveBroadcastTargetIds(conv: {
     createdById?: string | null;
     broadcastIncludeAllUsers?: boolean | null;
+    automaticRules?: Array<{ companyId?: string | null; departmentId?: string | null }>;
     broadcastTargets?: Array<{ userId: string }>;
     broadcastCompanyTargets?: Array<{ companyId: string }>;
     broadcastDepartmentTargets?: Array<{ departmentId: string }>;
@@ -507,14 +514,25 @@ export class MessagesService {
     const departmentIds = (conv.broadcastDepartmentTargets ?? [])
       .map((item) => String(item?.departmentId ?? '').trim())
       .filter(Boolean);
+    const automaticRules = (conv.automaticRules ?? [])
+      .map((rule) => ({
+        companyId: rule?.companyId ? String(rule.companyId).trim() : null,
+        departmentId: rule?.departmentId ? String(rule.departmentId).trim() : null,
+      }))
+      .filter((rule) => !!rule.companyId || !!rule.departmentId);
 
-    if (conv.broadcastIncludeAllUsers || companyIds.length || departmentIds.length) {
+    if (conv.broadcastIncludeAllUsers || automaticRules.length || companyIds.length || departmentIds.length) {
       const dynamicUsers = await this.prisma.user.findMany({
         where: {
           isActive: true,
           id: { not: ownerId },
           OR: conv.broadcastIncludeAllUsers
             ? undefined
+            : automaticRules.length
+            ? automaticRules.map((rule) => ({
+                ...(rule.companyId ? { companyId: rule.companyId } : null),
+                ...(rule.departmentId ? { departmentId: rule.departmentId } : null),
+              }))
             : [
                 ...(companyIds.length ? [{ companyId: { in: companyIds } }] : []),
                 ...(departmentIds.length ? [{ departmentId: { in: departmentIds } }] : []),

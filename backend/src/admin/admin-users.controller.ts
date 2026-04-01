@@ -14,11 +14,17 @@ import {
 import * as argon2 from 'argon2';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminJwtAuthGuard } from '../admin-auth/admin-jwt-auth.guard';
+import { ConversationsService } from '../conversations/conversations.service';
+import { ChatEventsService } from '../chat/chat-events.service';
 
 @Controller('admin/users')
 @UseGuards(AdminJwtAuthGuard)
 export class AdminUsersController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly conversations: ConversationsService,
+    private readonly events: ChatEventsService,
+  ) {}
 
   @Post()
   async createUser(
@@ -97,6 +103,16 @@ export class AdminUsersController {
         department: { select: { id: true, name: true } },
       },
     });
+
+    const autoGroups = await this.conversations.syncAutomaticGroupMembershipsForUser(user.id);
+    for (const group of autoGroups) {
+      for (const participantId of group.participantIds) {
+        this.events.emitConversationsSync(participantId, {
+          conversationId: group.conversationId,
+          force: true,
+        });
+      }
+    }
 
     return { ok: true, user };
   }
@@ -261,6 +277,16 @@ export class AdminUsersController {
         department: { select: { id: true, name: true } },
       },
     });
+
+    const autoGroups = await this.conversations.syncAutomaticGroupMembershipsForUser(updated.id);
+    for (const group of autoGroups) {
+      for (const participantId of group.participantIds) {
+        this.events.emitConversationsSync(participantId, {
+          conversationId: group.conversationId,
+          force: true,
+        });
+      }
+    }
 
     return { ok: true, user: updated };
   }
